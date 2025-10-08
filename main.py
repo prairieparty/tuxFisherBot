@@ -13,6 +13,8 @@
 - Introduced debug module with live overlay (not to be included in final build).
 - Tried various image recognition methods (template matching, pyautogui, ORB).
 - Added function to debug ORB keypoints.
+20251008:
+- Set up GitHub repository.
 
 '''
 '''To Do:
