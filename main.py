@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 
 # Author: Jackson O'Connor
-# Date: 20251001
+# Date: 20251008
 # Description: This program automatically launches Tux Fisher, before proceeding to automatically catch fish.
 '''Patch Notes:
 20251001: Initial commit.
