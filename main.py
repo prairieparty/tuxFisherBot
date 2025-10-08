@@ -63,6 +63,7 @@ else:
 
 # Find all image files in the images directory
 image_files = list(Path(images_directory).rglob("*.png")) + list(Path(images_directory).rglob("*.jpg")) # Add more image formats as needed
+fullscreen_button = [img for img in image_files if img.name == "fullscreen_icon.png"][0]
 
 # Find and load modules
 module_files = list(Path(modules_directory).rglob("*.py"))
@@ -88,7 +89,6 @@ def launch_tux_fisher(delay=3):
     os.popen("xdg-open https://pushergames.itch.io/tuxfishing") # opens the web version of Tux Fishing
     time.sleep(delay) # Wait for Tux Fishing to open
     # fullscreen the game by finding the fullscreen button and clicking it
-    fullscreen_button = [img for img in image_files if img.name == "fullscreen_icon.png"][0]
     if fullscreen_button:
         try:
             fullscreen_location = pyautogui.locateCenterOnScreen(str(fullscreen_button), confidence=0.8)
