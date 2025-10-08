@@ -19,7 +19,10 @@
 
 '''
 '''To Do:
-- create segregated control module (pyautogui)
+- determine angle of penguin avatar (vision module)
+- create function to rotate avatar to face fish (control module)
+- determine distance to fish (vision module)
+- create function to cast line (control module)
 - create "search" mode to look around the environment for fish (if it doesn't introduce false positives into ORB detection)
 - implement image recognition to detect fish
 - create function to catch fish using control module
