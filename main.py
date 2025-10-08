@@ -108,6 +108,17 @@ def debugORB():
     launch_tux_fisher()
     # Debug ORB keypoints
     debug.debug_orb_keypoints()
+def debugPlayerAngle():
+    # Launch Tux Fisher
+    launch_tux_fisher()
+    time.sleep(5) #let me rotate the avatar to test various angles
+    # Debug player angle
+    debug.debug_player_angle(
+        player_front_path=str([img for img in image_files if img.name == "player_front.png"][0]),
+        player_back_path=str([img for img in image_files if img.name == "player_back.png"][0]),
+        player_left_path=str([img for img in image_files if img.name == "player_left.png"][0]),
+        player_right_path=str([img for img in image_files if img.name == "player_right.png"][0])
+    )
 
 # Main Logic
 def main():
@@ -129,4 +140,4 @@ def main():
 
 if __name__ == "__main__":
     # main()
-    debugORB()
+    debugPlayerAngle()

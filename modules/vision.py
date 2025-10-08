@@ -6,38 +6,51 @@ from time import sleep
 
 # Module to handle vision-related tasks
 
-def determine_player_angle(avatar_image_path, screenshot=None):
-    ''' The player avatar is a 3D penguin model that rotates independently of the cursor.
-        This function determines the angle the avatar is facing using template matching.
-        
-        Args:
-            avatar_image_path (str): Path to the avatar image file.
-            screenshot (PIL.Image or None): Optional screenshot to use instead of taking a new one.
-        
-        Returns:
-            float: Angle in degrees the avatar is facing (0-360), or None if not found.
+def determine_player_angle(avatar_image_front, avatar_image_back, screenshot=None):
+    ''' Determine the angle of the player avatar in the screenshot;
+    the avatar starts off facing dead on towards the screen (0 degrees).
+    Args:
+        avatar_image_path (str): Path to the avatar image file.
+        screenshot (PIL.Image or None): Optional screenshot to analyze. If None, takes a new screenshot.
+    Returns:
+        float: Angle in degrees the avatar is facing (0 = straight, positive = right,
+                negative = left). Returns None if avatar not found.
     '''
-    # Take screenshot if not provided
+    #Goal is to rotate the penguin 180, so that we can see it from the back.
+    #penguin is just a black shape against a blue background, so we can use color thresholding to find it.
     if screenshot is None:
         screenshot = pyautogui.screenshot()
     frame = cv.cvtColor(np.array(screenshot), cv.COLOR_RGB2BGR)
-    gray = cv.cvtColor(frame, cv.COLOR_BGR2GRAY)
-    avatar_image = cv.imread(avatar_image_path, cv.IMREAD_GRAYSCALE)
-    if avatar_image is None:
-        raise FileNotFoundError(f"Avatar image not found at {avatar_image_path}")
-    w, h = avatar_image.shape[::-1]
-    result = cv.matchTemplate(gray, avatar_image, cv.TM_CCOEFF_NORMED)
-    min_val, max_val, min_loc, max_loc = cv.minMaxLoc(result)
-    threshold = 0.8
-    if max_val >= threshold:
-        top_left = max_loc
-        center_x = top_left[0] + w // 2
-        screen_center_x = frame.shape[1] // 2
-        angle = (center_x - screen_center_x) / screen_center_x * 90  # Scale to -90 to +90 degrees
-        angle = (angle + 360) % 360  # Normalize to 0-360 degrees
-        return angle
-    else:
+    hsv = cv.cvtColor(frame, cv.COLOR_BGR2HSV)
+    # Define color range for the penguin (black)
+    lower_black = np.array([0, 0, 0])
+    upper_black = np.array([180, 255, 50])
+    mask = cv.inRange(hsv, lower_black, upper_black)
+    contours, _ = cv.findContours(mask, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE)
+    if not contours:
         return None
+    # Assume the largest contour is the penguin
+    largest_contour = max(contours, key=cv.contourArea)
+    x, y, w, h = cv.boundingRect(largest_contour)
+    penguin_roi = frame[y:y+h, x:x+w]
+    penguin_gray = cv.cvtColor(penguin_roi, cv.COLOR_BGR2GRAY)
+    # Load avatar images
+    front_img = cv.imread(avatar_image_front, cv.IMREAD_GRAYSCALE)
+    back_img = cv.imread(avatar_image_back, cv.IMREAD_GRAYSCALE)
+    if front_img is None or back_img is None:
+        raise FileNotFoundError("Avatar image files not found.")
+    # Template matching
+    res_front = cv.matchTemplate(penguin_gray, front_img, cv.TM_CCOEFF_NORMED)
+    res_back = cv.matchTemplate(penguin_gray, back_img, cv.TM_CCOEFF_NORMED)
+    _, max_val_front, _, _ = cv.minMaxLoc(res_front)
+    _, max_val_back, _, _ = cv.minMaxLoc(res_back)
+    # Determine angle based on which template matched better
+    if max_val_front > max_val_back and max_val_front > 0.5:
+        return 0.0  # Facing front
+    elif max_val_back > max_val_front and max_val_back > 0.5:
+        return 180.0  # Facing back
+    else:
+        return None  # Avatar not found or unclear
 
 def locate_splashes_orb(image_path=None, roi=(400, 300, 600, 200), threshold=10):
     """
