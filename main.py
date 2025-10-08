@@ -15,7 +15,9 @@
 - Added function to debug ORB keypoints.
 20251008:
 - Set up GitHub repository.
-
+- Updated ORB parameters in vision module to match debug model.
+- Condensed variables in main.py to their respective sections.
+- Began developing detection for player avatar angle (vision module).
 
 '''
 '''To Do:

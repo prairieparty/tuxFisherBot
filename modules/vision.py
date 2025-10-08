@@ -6,6 +6,39 @@ from time import sleep
 
 # Module to handle vision-related tasks
 
+def determine_player_angle(avatar_image_path, screenshot=None):
+    ''' The player avatar is a 3D penguin model that rotates independently of the cursor.
+        This function determines the angle the avatar is facing using template matching.
+        
+        Args:
+            avatar_image_path (str): Path to the avatar image file.
+            screenshot (PIL.Image or None): Optional screenshot to use instead of taking a new one.
+        
+        Returns:
+            float: Angle in degrees the avatar is facing (0-360), or None if not found.
+    '''
+    # Take screenshot if not provided
+    if screenshot is None:
+        screenshot = pyautogui.screenshot()
+    frame = cv.cvtColor(np.array(screenshot), cv.COLOR_RGB2BGR)
+    gray = cv.cvtColor(frame, cv.COLOR_BGR2GRAY)
+    avatar_image = cv.imread(avatar_image_path, cv.IMREAD_GRAYSCALE)
+    if avatar_image is None:
+        raise FileNotFoundError(f"Avatar image not found at {avatar_image_path}")
+    w, h = avatar_image.shape[::-1]
+    result = cv.matchTemplate(gray, avatar_image, cv.TM_CCOEFF_NORMED)
+    min_val, max_val, min_loc, max_loc = cv.minMaxLoc(result)
+    threshold = 0.8
+    if max_val >= threshold:
+        top_left = max_loc
+        center_x = top_left[0] + w // 2
+        screen_center_x = frame.shape[1] // 2
+        angle = (center_x - screen_center_x) / screen_center_x * 90  # Scale to -90 to +90 degrees
+        angle = (angle + 360) % 360  # Normalize to 0-360 degrees
+        return angle
+    else:
+        return None
+
 def locate_splashes_orb(image_path=None, roi=(400, 300, 600, 200), threshold=10):
     """
     Detect activity (fish/splash) in a region of the screen using ORB keypoints.
@@ -25,7 +58,7 @@ def locate_splashes_orb(image_path=None, roi=(400, 300, 600, 200), threshold=10)
 
     # ORB detector (high sensitivity)
     orb = cv.ORB_create(
-        nfeatures=1000,
+        nfeatures=3000,
         scaleFactor=1.1,
         nlevels=12,
         edgeThreshold=15,
