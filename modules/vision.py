@@ -6,51 +6,84 @@ from time import sleep
 
 # Module to handle vision-related tasks
 
-def determine_player_angle(avatar_image_front, avatar_image_back, screenshot=None):
-    ''' Determine the angle of the player avatar in the screenshot;
-    the avatar starts off facing dead on towards the screen (0 degrees).
+def determine_player_angle(avatar_image_front, avatar_image_back, avatar_image_left, avatar_image_right, screenshot=None):
+    """
+    Determine the angle of the player avatar using ORB feature matching.
+
     Args:
-        avatar_image_path (str): Path to the avatar image file.
-        screenshot (PIL.Image or None): Optional screenshot to analyze. If None, takes a new screenshot.
+        avatar_image_front (str): Path to the front view image of the avatar.
+        avatar_image_back (str): Path to the back view image of the avatar.
+        avatar_image_left (str): Path to the left view image of the avatar.
+        avatar_image_right (str): Path to the right view image of the avatar.
+        screenshot (numpy array): Optional screenshot image. If None, a new screenshot will be taken.
+
     Returns:
-        float: Angle in degrees the avatar is facing (0 = straight, positive = right,
-                negative = left). Returns None if avatar not found.
-    '''
-    #Goal is to rotate the penguin 180, so that we can see it from the back.
-    #penguin is just a black shape against a blue background, so we can use color thresholding to find it.
+        float: Angle in degrees (0 = front, 90 = right, 180 = back, 270 = left), or None if not found.
+    """
+    # Load avatar images
+    img_front = cv.imread(avatar_image_front, cv.IMREAD_GRAYSCALE)
+    img_back = cv.imread(avatar_image_back, cv.IMREAD_GRAYSCALE)
+    img_left = cv.imread(avatar_image_left, cv.IMREAD_GRAYSCALE)
+    img_right = cv.imread(avatar_image_right, cv.IMREAD_GRAYSCALE)
+
+    if img_front is None or img_back is None or img_left is None or img_right is None:
+        raise ValueError("One or more avatar images not found or could not be loaded.")
+
+    # Take screenshot if not provided
     if screenshot is None:
         screenshot = pyautogui.screenshot()
-    frame = cv.cvtColor(np.array(screenshot), cv.COLOR_RGB2BGR)
-    hsv = cv.cvtColor(frame, cv.COLOR_BGR2HSV)
-    # Define color range for the penguin (black)
-    lower_black = np.array([0, 0, 0])
-    upper_black = np.array([180, 255, 50])
-    mask = cv.inRange(hsv, lower_black, upper_black)
-    contours, _ = cv.findContours(mask, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE)
-    if not contours:
+        screenshot = cv.cvtColor(np.array(screenshot), cv.COLOR_RGB2BGR)
+    gray_screenshot = cv.cvtColor(screenshot, cv.COLOR_BGR2GRAY)
+
+    # ORB detector
+    orb = cv.ORB_create(
+        nfeatures=2000,
+        scaleFactor=1.2,
+        nlevels=8,
+        edgeThreshold=31,
+        fastThreshold=20
+    )
+
+    # Detect keypoints and descriptors
+    kp_front, des_front = orb.detectAndCompute(img_front, None)
+    kp_back, des_back = orb.detectAndCompute(img_back, None)
+    kp_left, des_left = orb.detectAndCompute(img_left, None)
+    kp_right, des_right = orb.detectAndCompute(img_right, None)
+    kp_screenshot, des_screenshot = orb.detectAndCompute(gray_screenshot, None)
+
+    if des_screenshot is None:
         return None
-    # Assume the largest contour is the penguin
-    largest_contour = max(contours, key=cv.contourArea)
-    x, y, w, h = cv.boundingRect(largest_contour)
-    penguin_roi = frame[y:y+h, x:x+w]
-    penguin_gray = cv.cvtColor(penguin_roi, cv.COLOR_BGR2GRAY)
-    # Load avatar images
-    front_img = cv.imread(avatar_image_front, cv.IMREAD_GRAYSCALE)
-    back_img = cv.imread(avatar_image_back, cv.IMREAD_GRAYSCALE)
-    if front_img is None or back_img is None:
-        raise FileNotFoundError("Avatar image files not found.")
-    # Template matching
-    res_front = cv.matchTemplate(penguin_gray, front_img, cv.TM_CCOEFF_NORMED)
-    res_back = cv.matchTemplate(penguin_gray, back_img, cv.TM_CCOEFF_NORMED)
-    _, max_val_front, _, _ = cv.minMaxLoc(res_front)
-    _, max_val_back, _, _ = cv.minMaxLoc(res_back)
-    # Determine angle based on which template matched better
-    if max_val_front > max_val_back and max_val_front > 0.5:
-        return 0.0  # Facing front
-    elif max_val_back > max_val_front and max_val_back > 0.5:
-        return 180.0  # Facing back
-    else:
-        return None  # Avatar not found or unclear
+
+    # BFMatcher
+    bf = cv.BFMatcher(cv.NORM_HAMMING, crossCheck=True)
+
+    # Match descriptors
+    matches_front = bf.match(des_front, des_screenshot)
+    matches_back = bf.match(des_back, des_screenshot)
+    matches_left = bf.match(des_left, des_screenshot)
+    matches_right = bf.match(des_right, des_screenshot)
+
+    # Determine which has more good matches
+    num_matches = {
+        "front": len(matches_front),
+        "back": len(matches_back),
+        "left": len(matches_left),
+        "right": len(matches_right)
+    }
+    max_side = max(num_matches, key=num_matches.get)
+
+    if num_matches[max_side] == 0:
+        return None
+
+    # Map sides to angles
+    angle_map = {
+        "front": 0,
+        "right": 90,
+        "back": 180,
+        "left": 270
+    }
+
+    return angle_map[max_side]
 
 def locate_splashes_orb(image_path=None, roi=(400, 300, 600, 200), threshold=10):
     """

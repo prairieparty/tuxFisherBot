@@ -18,10 +18,16 @@
 - Updated ORB parameters in vision module to match debug model.
 - Condensed variables in main.py to their respective sections.
 - Began developing detection for player avatar angle (vision module).
+- Moved player images to images/player directory & updated code accordingly.
 
 '''
 '''To Do:
 - determine angle of penguin avatar (vision module)
+-- current issue is that it just flips between two angles, likely due to insufficient keypoints.
+-- maybe edit the images in GIMP to remove the background entirely, leaving just the penguin?
+-- or try a different image recognition method?
+-- or just different images of the penguin?
+-- idk
 - create function to rotate avatar to face fish (control module)
 - determine distance to fish (vision module)
 - create function to cast line (control module)
@@ -30,7 +36,7 @@
 - create function to catch fish using control module
 '''
 
-# Imports
+# IMPORTS
 
 import cv2 as cv
 import numpy as np
@@ -41,7 +47,7 @@ from pathlib import Path
 import sys
 from importlib.util import spec_from_file_location, module_from_spec
 
-# Variables
+# VARIABLES
 
 # Find images & modules directory
 home_path = Path("/home/")
@@ -65,7 +71,19 @@ else:
 
 # Find all image files in the images directory
 image_files = list(Path(images_directory).rglob("*.png")) + list(Path(images_directory).rglob("*.jpg")) # Add more image formats as needed
+# Find fullscreen button image
 fullscreen_button = [img for img in image_files if img.name == "fullscreen_icon.png"][0]
+# Find all images in the player subfolder
+player_images = list(Path(images_directory / "player").rglob("*.png")) + list(Path(images_directory / "player").rglob("*.jpg")) # Add more image formats as needed
+# Reorder player images to start with back & go clockwise
+player_images_ordered = []
+try:
+    assert len(player_images) == 8, "Expected 8 player images (front, back, left, right, NE, NW, SE, SW). Please ensure all are present in the player images directory."
+except AssertionError as e:
+    print(e)
+for name in ["player_front.png", "player_SE.png", "player_right.png", "player_NE.png", "player_back.png", "player_NW.png", "player_left.png", "player_SW.png"]:
+    player_images_ordered.append([img for img in player_images if img.name == name][0])
+player_images = player_images_ordered
 
 # Find and load modules
 module_files = list(Path(modules_directory).rglob("*.py"))
@@ -85,7 +103,8 @@ debug = module_from_spec(debugspec)
 sys.modules["debug"] = debug
 debugspec.loader.exec_module(debug)
 
-# Functions
+# FUNCTIONS
+
 def launch_tux_fisher(delay=3):
     # Open Tux Fishing
     os.popen("xdg-open https://pushergames.itch.io/tuxfishing") # opens the web version of Tux Fishing
@@ -113,12 +132,7 @@ def debugPlayerAngle():
     launch_tux_fisher()
     time.sleep(5) #let me rotate the avatar to test various angles
     # Debug player angle
-    debug.debug_player_angle(
-        player_front_path=str([img for img in image_files if img.name == "player_front.png"][0]),
-        player_back_path=str([img for img in image_files if img.name == "player_back.png"][0]),
-        player_left_path=str([img for img in image_files if img.name == "player_left.png"][0]),
-        player_right_path=str([img for img in image_files if img.name == "player_right.png"][0])
-    )
+    debug.debug_player_angle(player_images)
 
 # Main Logic
 def main():

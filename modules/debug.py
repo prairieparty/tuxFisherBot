@@ -111,7 +111,7 @@ def debug_orb_keypoints():
     sys.exit(app.exec_())
 
 class PlayerOverlay(QtWidgets.QWidget):
-    def __init__(self, player_front_path, player_back_path, player_left_path, player_right_path, fps=10):
+    def __init__(self, player_images, fps=10):
         super().__init__()
 
         # Transparent overlay
@@ -120,13 +120,14 @@ class PlayerOverlay(QtWidgets.QWidget):
                             QtCore.Qt.Tool)
         self.setAttribute(QtCore.Qt.WA_TranslucentBackground)
 
-        # Load player images
-        self.player_front = cv.imread(player_front_path, cv.IMREAD_GRAYSCALE)
-        self.player_back = cv.imread(player_back_path, cv.IMREAD_GRAYSCALE)
-        self.player_left = cv.imread(player_left_path, cv.IMREAD_GRAYSCALE)
-        self.player_right = cv.imread(player_right_path, cv.IMREAD_GRAYSCALE)
-        if self.player_front is None or self.player_back is None or self.player_left is None or self.player_right is None:
-            raise ValueError("Player images not found or could not be loaded.")
+        # Load player images into a list
+        self.player_images = []
+        for img in player_images:
+            image = cv.imread(str(img), cv.IMREAD_GRAYSCALE)
+            if image is not None:
+                self.player_images.append(image)
+        if len(self.player_images) < 8:
+            raise ValueError("Not all player images could be loaded.")
 
         # ORB
         self.orb = cv.ORB_create(
@@ -136,10 +137,13 @@ class PlayerOverlay(QtWidgets.QWidget):
             edgeThreshold=15,
             fastThreshold=10
         )
-        self.kp_front, self.des_front = self.orb.detectAndCompute(self.player_front, None)
-        self.kp_back, self.des_back = self.orb.detectAndCompute(self.player_back, None)
-        self.kp_left, self.des_left = self.orb.detectAndCompute(self.player_left, None)
-        self.kp_right, self.des_right = self.orb.detectAndCompute(self.player_right, None)
+        # Compute keypoints and descriptors for player images
+        self.kps = []
+        self.dess = []
+        for img in self.player_images:
+            kp, des = self.orb.detectAndCompute(img, None)
+            self.kps.append(kp)
+            self.dess.append(des)
 
         # BFMatcher
         self.bf = cv.BFMatcher(cv.NORM_HAMMING, crossCheck=True)
@@ -180,50 +184,28 @@ class PlayerOverlay(QtWidgets.QWidget):
 
         kp_frame, des_frame = self.orb.detectAndCompute(gray, None)
 
-        matches_front = []
-        matches_back = []
-        matches_left = []
-        matches_right = []
-        
-        if des_frame is not None:
-            matches_front = self.bf.match(self.des_front, des_frame)
-            matches_back = self.bf.match(self.des_back, des_frame)
-            matches_left = self.bf.match(self.des_left, des_frame)
-            matches_right = self.bf.match(self.des_right, des_frame)
+        self.found = False
+        self.angle = None
+        if kp_frame is not None and des_frame is not None:
+            best_matches = []
+            for i, des in enumerate(self.dess):
+                if des is not None and len(des) > 0:
+                    matches = self.bf.match(des, des_frame)
+                    matches = sorted(matches, key=lambda x: x.distance)
+                    best_matches.append((i, matches))
 
-        # Sort matches by distance
-        matches_front = sorted(matches_front, key=lambda x: x.distance)
-        matches_back = sorted(matches_back, key=lambda x: x.distance)
-        matches_left = sorted(matches_left, key=lambda x: x.distance)
-        matches_right = sorted(matches_right, key=lambda x: x.distance)
+            # Determine best matching player image
+            best_img_index = None
+            best_match_count = 0
+            for i, matches in best_matches:
+                if len(matches) > best_match_count and len(matches) > 10:  # Arbitrary threshold of 10 matches
+                    best_match_count = len(matches)
+                    best_img_index = i
 
-        # Determine which has more good matches
-        good_matches_front = [m for m in matches_front if m.distance < 50]
-        good_matches_back = [m for m in matches_back if m.distance < 50]
-        good_matches_left = [m for m in matches_left if m.distance < 50]
-        good_matches_right = [m for m in matches_right if m.distance < 50]
-
-        match_counts = {
-            'front': len(good_matches_front),
-            'back': len(good_matches_back),
-            'left': len(good_matches_left),
-            'right': len(good_matches_right)
-        }
-        best_view = max(match_counts, key=match_counts.get)
-        best_count = match_counts[best_view]
-        if best_count >= 10:  # Arbitrary threshold for detection
-            self.found = True
-            if best_view == 'front':
-                self.angle = 0.0
-            elif best_view == 'right':
-                self.angle = 90.0
-            elif best_view == 'back':
-                self.angle = 180.0
-            elif best_view == 'left':
-                self.angle = 270.0
-        else:
-            self.found = False
-            self.angle = None
+            if best_img_index is not None:
+                self.found = True
+                # Calculate angle based on index (assuming order: front, SE, right, NE, back, NW, left, SW)
+                self.angle = (best_img_index * 45) % 360
         self.repaint()
     def paintEvent(self, event):
         painter = QtGui.QPainter(self)
@@ -243,8 +225,12 @@ class PlayerOverlay(QtWidgets.QWidget):
         painter.setPen(QtGui.QPen(color))
         painter.drawText(20, 40, text)
 
-def debug_player_angle(player_front_path, player_back_path, player_left_path, player_right_path):
+def debug_player_angle(player_images):
     app = QtWidgets.QApplication(sys.argv)
-    overlay = PlayerOverlay(player_front_path, player_back_path, player_left_path, player_right_path, fps=5)
-    overlay.showFullScreen()
+    overlay = PlayerOverlay(player_images, fps=5)
+    # only overlay the top half of the screen
+    screen = QtWidgets.QApplication.primaryScreen().geometry()
+    overlay.setGeometry(0, 0, screen.width(), screen.height()//4)
+
+    overlay.show()
     sys.exit(app.exec_())
