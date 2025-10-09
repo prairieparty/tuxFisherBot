@@ -2,9 +2,23 @@ import cv2 as cv
 from pathlib import Path
 import numpy as np
 import pyautogui
+from mss import mss
 from time import sleep
 
 # Module to handle vision-related tasks
+def screenshot_roi(roi=None):
+    '''Capture a screenshot of the whole screen by default, or a specific ROI if provided.'''
+    with mss() as sct:
+        # Use the first monitor (index 1); adjust if needed
+        monitor = sct.monitors[1]
+        if roi:
+            x, y, w, h = roi
+            monitor = {"top": y, "left": x, "width": w, "height": h}
+        screenshot = sct.grab(monitor)
+        # Convert to numpy array and BGR for OpenCV
+        screen_frame = np.array(screenshot)
+        screen_frame = cv.cvtColor(screen_frame, cv.COLOR_BGRA2BGR)
+    return screen_frame
 
 def determine_player_angle(avatar_image_front, avatar_image_back, avatar_image_left, avatar_image_right, screenshot=None):
     """

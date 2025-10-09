@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 
 # Author: Jackson O'Connor
-# Date: 20251008
+# Date: 20251009
 # Description: This program automatically launches Tux Fisher, before proceeding to automatically catch fish.
 '''Patch Notes:
 20251001: Initial commit.
@@ -19,15 +19,17 @@
 - Condensed variables in main.py to their respective sections.
 - Began developing detection for player avatar angle (vision module).
 - Moved player images to images/player directory & updated code accordingly.
+20251009:
+- Started debugging player angle detection with matched keypoint geometry (debug module).
+- Added black & white masking functions to debug module to assist with player angle detection.
+- Changed screenshot method in vision module to use mss for better performance + ROI selection.
 
 '''
 '''To Do:
 - determine angle of penguin avatar (vision module)
--- current issue is that it just flips between two angles, likely due to insufficient keypoints.
--- maybe edit the images in GIMP to remove the background entirely, leaving just the penguin?
--- or try a different image recognition method?
--- or just different images of the penguin?
--- idk
+-- right now it can't even see the firefox window
+-- WHY???
+-- fullscreening has nothing to do with it, tested with and without fullscreen
 - create function to rotate avatar to face fish (control module)
 - determine distance to fish (vision module)
 - create function to cast line (control module)
@@ -39,6 +41,7 @@
 # IMPORTS
 
 import cv2 as cv
+from mss import mss
 import numpy as np
 import pyautogui
 import time
@@ -105,23 +108,25 @@ debugspec.loader.exec_module(debug)
 
 # FUNCTIONS
 
-def launch_tux_fisher(delay=3):
+def launch_tux_fisher(delay=5, fullscreen=True):
     # Open Tux Fishing
     os.popen("xdg-open https://pushergames.itch.io/tuxfishing") # opens the web version of Tux Fishing
     time.sleep(delay) # Wait for Tux Fishing to open
     # fullscreen the game by finding the fullscreen button and clicking it
-    if fullscreen_button:
-        try:
-            fullscreen_location = pyautogui.locateCenterOnScreen(str(fullscreen_button), confidence=0.8)
-            if fullscreen_location:
-                pyautogui.click(fullscreen_location)
-                time.sleep(2) # Wait for the game to go fullscreen
-            else:
-                print("Fullscreen button not found on screen.")
-        except Exception as e:
-            print(f"Error locating fullscreen button: {e}")
+    if fullscreen:
+        if fullscreen_button:
+            try:
+                fullscreen_location = pyautogui.locateCenterOnScreen(str(fullscreen_button), confidence=0.8)
+                if fullscreen_location:
+                    pyautogui.click(fullscreen_location)
+                    time.sleep(2) # Wait for the game to go fullscreen
+                else:
+                    print("Fullscreen button not found on screen.")
+            except Exception as e:
+                print(f"Error locating fullscreen button: {e}")
     else:
         print("Fullscreen button image not found in images directory.")
+
 def debugORB():
     # Launch Tux Fisher
     launch_tux_fisher()
@@ -137,7 +142,11 @@ def debugPlayerAngle():
 # Main Logic
 def main():
     # Launch Tux Fisher
-    launch_tux_fisher()
+    launch_tux_fisher(fullscreen=False)
+    
+    time.sleep(5) #i want to make sure it can mask right
+    debug.saveBlackAndWhiteMasks()
+
     # run for 30 seconds and locate splashes
     start_time = time.time()
     while time.time() - start_time < 30:
@@ -153,5 +162,5 @@ def main():
 
 
 if __name__ == "__main__":
-    # main()
-    debugPlayerAngle()
+    main()
+    # debugPlayerAngle()

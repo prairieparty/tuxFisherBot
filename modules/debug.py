@@ -1,6 +1,8 @@
 import sys
 import cv2 as cv
 import numpy as np
+import vision
+from mss import mss
 import pyautogui
 from PyQt5 import QtWidgets, QtGui, QtCore
 
@@ -110,52 +112,78 @@ def debug_orb_keypoints():
     overlay.showFullScreen()
     sys.exit(app.exec_())
 
+def getBlackMasking(img=vision.screenshot_roi()):
+    # given screenshot image, return black areas masked as white, rest black
+    frame = cv.cvtColor(np.array(img), cv.COLOR_RGB2BGR)
+    #convert to HSV
+    hsv = cv.cvtColor(frame, cv.COLOR_BGR2HSV)
+    # define range for black color in HSV
+    lower_black = np.array([0, 0, 0])
+    upper_black = np.array([180, 255, 30]) # value up to 30 for dark/black areas
+    # create mask
+    mask = cv.inRange(hsv, lower_black, upper_black)
+    return mask
+
+def getWhiteMasking(img=vision.screenshot_roi()):
+    # given screenshot image, return white areas masked as white, rest black
+    frame = cv.cvtColor(np.array(img), cv.COLOR_RGB2BGR)
+    #convert to HSV
+    hsv = cv.cvtColor(frame, cv.COLOR_BGR2HSV)
+    # define range for white color in HSV
+    lower_white = np.array([0, 0, 200])
+    upper_white = np.array([180, 25, 255])
+    # create mask
+    mask = cv.inRange(hsv, lower_white, upper_white)
+    return mask
+
 class PlayerOverlay(QtWidgets.QWidget):
     def __init__(self, player_images, fps=10):
         super().__init__()
 
-        # Transparent overlay
+        # Transparent overlay setup
         self.setWindowFlags(QtCore.Qt.FramelessWindowHint |
                             QtCore.Qt.WindowStaysOnTopHint |
                             QtCore.Qt.Tool)
         self.setAttribute(QtCore.Qt.WA_TranslucentBackground)
 
-        # Load player images into a list
+        # Load reference images
         self.player_images = []
         for img in player_images:
             image = cv.imread(str(img), cv.IMREAD_GRAYSCALE)
             if image is not None:
                 self.player_images.append(image)
-        if len(self.player_images) < 8:
-            raise ValueError("Not all player images could be loaded.")
+        if len(self.player_images) == 0:
+            raise ValueError("No player images could be loaded.")
 
-        # ORB
-        self.orb = cv.ORB_create(
-            nfeatures=3000,
-            scaleFactor=1.1,
-            nlevels=12,
-            edgeThreshold=15,
-            fastThreshold=10
-        )
-        # Compute keypoints and descriptors for player images
-        self.kps = []
-        self.dess = []
+        # AKAZE feature detector (rotation-aware)
+        self.detector = cv.AKAZE_create(threshold=1e-4)
+
+        # Compute keypoints/descriptors for templates
+        self.kps, self.dess = [], []
         for img in self.player_images:
-            kp, des = self.orb.detectAndCompute(img, None)
+            kp, des = self.detector.detectAndCompute(img, None)
             self.kps.append(kp)
             self.dess.append(des)
 
-        # BFMatcher
+        # Matcher
         self.bf = cv.BFMatcher(cv.NORM_HAMMING, crossCheck=True)
+
+        # State variables
+        self.angle = None
+        self.angle_smooth = None
+        self.smoothing_alpha = 0.2
+        self.found = False
+        self.show_debug = False
 
         # Timer
         self.timer = QtCore.QTimer()
         self.timer.timeout.connect(self.update_overlay)
-        self.timer.start(int(1000/fps))
+        self.timer.start(int(1000 / fps))
 
-        # Quit shortcuts
+        # Shortcuts
         QtWidgets.QShortcut(QtGui.QKeySequence("Q"), self, activated=self.close)
         QtWidgets.QShortcut(QtGui.QKeySequence("Esc"), self, activated=self.close)
+        QtWidgets.QShortcut(QtGui.QKeySequence("D"), self, activated=self.toggle_debug)
 
         # Close button
         self.close_btn = QtWidgets.QPushButton("X", self)
@@ -172,58 +200,121 @@ class PlayerOverlay(QtWidgets.QWidget):
                 background-color: rgba(255, 50, 50, 220);
             }
         """)
-        self.close_btn.clicked.connect(self.close)
         screen = QtWidgets.QApplication.primaryScreen().geometry()
         self.close_btn.move(screen.width() - 60, 20)
-        self.angle = None
-        self.found = False
+
+    # ------------------------------------------------------------
+
+    def toggle_debug(self):
+        self.show_debug = not self.show_debug
+        if not self.show_debug:
+            cv.destroyAllWindows()
+
+    # ------------------------------------------------------------
+
     def update_overlay(self):
         screenshot = pyautogui.screenshot()
         frame = cv.cvtColor(np.array(screenshot), cv.COLOR_RGB2BGR)
         gray = cv.cvtColor(frame, cv.COLOR_BGR2GRAY)
 
-        kp_frame, des_frame = self.orb.detectAndCompute(gray, None)
+        # Focus on ±400 px area around screen center
+        h, w = gray.shape
+        cx, cy = w // 2, h // 2
+        x1, y1 = max(0, cx - 400), max(0, cy - 400)
+        x2, y2 = min(w, cx + 400), min(h, cy + 400)
+        roi = gray[y1:y2, x1:x2]
 
+        # Detect features in the ROI
+        kp_frame, des_frame = self.detector.detectAndCompute(roi, None)
         self.found = False
         self.angle = None
-        if kp_frame is not None and des_frame is not None:
-            best_matches = []
-            for i, des in enumerate(self.dess):
-                if des is not None and len(des) > 0:
-                    matches = self.bf.match(des, des_frame)
-                    matches = sorted(matches, key=lambda x: x.distance)
-                    best_matches.append((i, matches))
 
-            # Determine best matching player image
-            best_img_index = None
-            best_match_count = 0
-            for i, matches in best_matches:
-                if len(matches) > best_match_count and len(matches) > 10:  # Arbitrary threshold of 10 matches
-                    best_match_count = len(matches)
-                    best_img_index = i
+        if kp_frame is None or des_frame is None or len(kp_frame) < 4:
+            self.repaint()
+            return
 
-            if best_img_index is not None:
-                self.found = True
-                # Calculate angle based on index (assuming order: front, SE, right, NE, back, NW, left, SW)
-                self.angle = (best_img_index * 45) % 360
+        # Try matching each template
+        best_score = -np.inf
+        best_angle = None
+        best_vis = None
+
+        for i, des in enumerate(self.dess):
+            if des is None or len(des) == 0:
+                continue
+
+            matches = self.bf.match(des, des_frame)
+            matches = sorted(matches, key=lambda x: x.distance)
+            good = [m for m in matches if m.distance < 70]
+            if len(good) < 4:
+                continue
+
+            pts1 = np.float32([self.kps[i][m.queryIdx].pt for m in good])
+            pts2 = np.float32([kp_frame[m.trainIdx].pt for m in good])
+
+            # Estimate affine transform between template and ROI
+            M, inliers = cv.estimateAffinePartial2D(pts1, pts2, method=cv.RANSAC)
+            if M is None:
+                continue
+
+            angle_rad = np.arctan2(M[1, 0], M[0, 0])
+            angle_deg = (np.degrees(angle_rad) + 360) % 360
+
+            inlier_ratio = np.mean(inliers) if inliers is not None else 0
+            score = inlier_ratio * len(good)
+
+            if score > best_score:
+                best_score = score
+                best_angle = angle_deg
+                if self.show_debug:
+                    best_vis = cv.drawMatches(
+                        self.player_images[i], self.kps[i],
+                        roi, kp_frame,
+                        good[:30], None,
+                        flags=cv.DrawMatchesFlags_NOT_DRAW_SINGLE_POINTS
+                    )
+
+        # Update final rotation estimate
+        if best_angle is not None:
+            self.found = True
+
+            if self.angle_smooth is None:
+                self.angle_smooth = best_angle
+            else:
+                diff = (best_angle - self.angle_smooth + 540) % 360 - 180
+                self.angle_smooth = (self.angle_smooth + self.smoothing_alpha * diff) % 360
+
+            self.angle = self.angle_smooth
+
+            # Debug window
+            if self.show_debug and best_vis is not None:
+                cv.putText(best_vis, f"Angle: {self.angle:.1f}°",
+                           (20, 50), cv.FONT_HERSHEY_SIMPLEX, 1.0, (0, 255, 0), 2)
+                cv.imshow("AKAZE Debug Matches", best_vis)
+                cv.waitKey(1)
+
         self.repaint()
+
+    # ------------------------------------------------------------
+
     def paintEvent(self, event):
         painter = QtGui.QPainter(self)
         painter.setRenderHint(QtGui.QPainter.Antialiasing)
-
-        screen = QtWidgets.QApplication.primaryScreen().geometry()
-
         if self.found and self.angle is not None:
-            text = f"Player Angle: {self.angle:.2f}°"
+            text = f"Player Angle: {self.angle:.1f}°"
             color = QtGui.QColor(0, 255, 0, 220)
         else:
             text = "Player Not Found"
             color = QtGui.QColor(255, 0, 0, 220)
-
-        # Draw text top-left
         painter.setFont(QtGui.QFont("Consolas", 16))
         painter.setPen(QtGui.QPen(color))
-        painter.drawText(20, 40, text)
+        painter.drawText(20, 40, text)       
+
+def saveBlackAndWhiteMasks():
+    black_mask = getBlackMasking()
+    white_mask = getWhiteMasking()
+    cv.imwrite("black_mask.png", black_mask)
+    cv.imwrite("white_mask.png", white_mask)
+    print("Black and white masks saved as black_mask.png and white_mask.png")
 
 def debug_player_angle(player_images):
     app = QtWidgets.QApplication(sys.argv)
