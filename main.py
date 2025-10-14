@@ -23,19 +23,24 @@
 - Started debugging player angle detection with matched keypoint geometry (debug module).
 - Added black & white masking functions to debug module to assist with player angle detection.
 - Changed screenshot method in vision module to use mss for better performance + ROI selection.
-
+20251014:
+- Fixed bug in screen capture using Jean's code from ImageCap.py.
 '''
 '''To Do:
+
 - determine angle of penguin avatar (vision module)
--- right now it can't even see the firefox window
--- WHY???
--- fullscreening has nothing to do with it, tested with and without fullscreen
+-- base it on how much white is in the mask + where the white is located
+-- more white on the left side means avatar is facing left, more white on right side means avatar is facing right
+-- more white overall means avatar is facing towards camera, less white means avatar is facing away from
+
 - create function to rotate avatar to face fish (control module)
+
 - determine distance to fish (vision module)
+
 - create function to cast line (control module)
+
 - create "search" mode to look around the environment for fish (if it doesn't introduce false positives into ORB detection)
-- implement image recognition to detect fish
-- create function to catch fish using control module
+
 '''
 
 # IMPORTS
@@ -88,25 +93,16 @@ for name in ["player_front.png", "player_SE.png", "player_right.png", "player_NE
     player_images_ordered.append([img for img in player_images if img.name == name][0])
 player_images = player_images_ordered
 
-# Find and load modules
-module_files = list(Path(modules_directory).rglob("*.py"))
-# Control module
-controlspec = spec_from_file_location("control", str([mf for mf in module_files if mf.name == "control.py"][0]))
-control = module_from_spec(controlspec)
-sys.modules["control"] = control
-controlspec.loader.exec_module(control)
-# Vision module
-visionspec = spec_from_file_location("vision", str([mf for mf in module_files if mf.name == "vision.py"][0]))
-vision = module_from_spec(visionspec)
-sys.modules["vision"] = vision
-visionspec.loader.exec_module(vision)
-# Debug module (not to be included in final build)
-debugspec = spec_from_file_location("debug", str([mf for mf in module_files if mf.name == "debug.py"][0]))
-debug = module_from_spec(debugspec)
-sys.modules["debug"] = debug
-debugspec.loader.exec_module(debug)
+
 
 # FUNCTIONS
+
+def loadModule(module_name):
+    module_spec = spec_from_file_location(module_name, str([mf for mf in module_files if mf.name == f"{module_name}.py"][0]))
+    module = module_from_spec(module_spec)
+    sys.modules[module_name] = module
+    module_spec.loader.exec_module(module)
+    return module
 
 def launch_tux_fisher(delay=5, fullscreen=True):
     # Open Tux Fishing
@@ -141,11 +137,24 @@ def debugPlayerAngle():
 
 # Main Logic
 def main():
+    # Find and load modules
+    global module_files
+    module_files = list(Path(modules_directory).rglob("*.py"))
+
+    # make modules accessible globally
+    global control, vision, debug
+
+    # load the control module
+    control = loadModule("control")
+    # load the vision module
+    vision = loadModule("vision")
+    # load the debug module (not to be included in final build)
+    debug = loadModule("debug")
+
     # Launch Tux Fisher
-    launch_tux_fisher(fullscreen=False)
+    launch_tux_fisher(fullscreen=True)
     
     time.sleep(5) #i want to make sure it can mask right
-    debug.saveBlackAndWhiteMasks()
 
     # run for 30 seconds and locate splashes
     start_time = time.time()
@@ -158,8 +167,6 @@ def main():
         else:
             print("No splashes found using ORB")
         time.sleep(0.1) # Wait before next search
-
-
 
 if __name__ == "__main__":
     main()

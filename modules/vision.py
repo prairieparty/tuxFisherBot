@@ -20,6 +20,37 @@ def screenshot_roi(roi=None):
         screen_frame = cv.cvtColor(screen_frame, cv.COLOR_BGRA2BGR)
     return screen_frame
 
+def screenshot_mask(mode="black"):
+    '''Capture a screenshot and return a mask of black areas.'''
+    with mss() as sct:
+        monitor_roi = sct.monitors[1]
+        screenshot = sct.grab(monitor_roi)
+        frame = np.array(screenshot)
+        frame = cv.cvtColor(frame, cv.COLOR_BGRA2BGR)
+
+        # Convert to HSV
+        hsv = cv.cvtColor(frame, cv.COLOR_BGR2HSV)
+        match mode:
+            case "black":
+                # HSV range for black (adjust upper[2] if needed for sensitivity to darkness)
+                lower_black = np.array([0, 0, 0])
+                upper_black = np.array([180, 255, 30])  # Value up to 30 for dark/black areas
+
+                # Create mask: white where black is detected, black elsewhere
+                mask = cv.inRange(hsv, lower_black, upper_black)
+            case "white":
+                # HSV range for white (adjust lower[2] if needed for sensitivity to brightness)
+                lower_white = np.array([0, 0, 200])  # Value from 200 for bright/white areas
+                upper_white = np.array([180, 25, 255])  # Saturation up to 25 for low color areas
+
+                # Create mask: white where white is detected, black elsewhere
+                mask = cv.inRange(hsv, lower_white, upper_white)
+            case _:
+                raise ValueError("Invalid mode. Use 'black' or 'white'.")
+
+        # Return the mask
+        return mask
+
 def determine_player_angle(avatar_image_front, avatar_image_back, avatar_image_left, avatar_image_right, screenshot=None):
     """
     Determine the angle of the player avatar using ORB feature matching.
