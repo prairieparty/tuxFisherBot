@@ -25,6 +25,8 @@
 - Changed screenshot method in vision module to use mss for better performance + ROI selection.
 20251014:
 - Fixed bug in screen capture using Jean's code from ImageCap.py.
+- added new module loading function to condense code.
+
 '''
 '''To Do:
 
