@@ -26,14 +26,10 @@
 20251014:
 - Fixed bug in screen capture using Jean's code from ImageCap.py.
 - added new module loading function to condense code.
+- made a working angle detection class - uses the white mask to find the penguin's general direction, and fishing rod to determine tilt angle.
 
 '''
 '''To Do:
-
-- determine angle of penguin avatar (vision module)
--- base it on how much white is in the mask + where the white is located
--- more white on the left side means avatar is facing left, more white on right side means avatar is facing right
--- more white overall means avatar is facing towards camera, less white means avatar is facing away from
 
 - create function to rotate avatar to face fish (control module)
 
@@ -125,18 +121,6 @@ def launch_tux_fisher(delay=5, fullscreen=True):
     else:
         print("Fullscreen button image not found in images directory.")
 
-def debugORB():
-    # Launch Tux Fisher
-    launch_tux_fisher()
-    # Debug ORB keypoints
-    debug.debug_orb_keypoints()
-def debugPlayerAngle():
-    # Launch Tux Fisher
-    launch_tux_fisher()
-    time.sleep(5) #let me rotate the avatar to test various angles
-    # Debug player angle
-    debug.debug_player_angle(player_images)
-
 # Main Logic
 def main():
     # Find and load modules
@@ -156,19 +140,26 @@ def main():
     # Launch Tux Fisher
     launch_tux_fisher(fullscreen=True)
     
-    time.sleep(5) #i want to make sure it can mask right
+    control.enterWindow() # Ensure the game window is active
 
-    # run for 30 seconds and locate splashes
-    start_time = time.time()
-    while time.time() - start_time < 30:
-        # Locate splashes using ORB
-        points = vision.locate_splashes_orb(roi=(0, 300, 2600, 300))
-        if points:
-            for point in points:
-                print(f"Splash found at {point} using ORB")
-        else:
-            print("No splashes found using ORB")
-        time.sleep(0.1) # Wait before next search
+    # Start the debug overlay (not to be included in final build)
+    debug.RodAngleTracker().run()
+    
+
+    # # run for 30 seconds and locate splashes
+    # start_time = time.time()
+    # while time.time() - start_time < 10:
+    #     # # Locate splashes using ORB
+    #     # points = vision.locate_splashes_orb(roi=(0, 300, 2600, 300))
+    #     # if points:
+    #     #     for point in points:
+    #     #         print(f"Splash found at {point} using ORB")
+    #     # else:
+    #     #     print("No splashes found using ORB")
+    #     # find player angle
+    #     angle = vision.determine_avatar_angle()
+    #     print(f"Player angle: {angle} degrees")
+    #     time.sleep(0.1) # Wait before next search
 
 if __name__ == "__main__":
     main()

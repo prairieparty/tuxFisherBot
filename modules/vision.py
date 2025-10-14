@@ -3,132 +3,177 @@ from pathlib import Path
 import numpy as np
 import pyautogui
 from mss import mss
+import math
 from time import sleep
 
 # Module to handle vision-related tasks
-def screenshot_roi(roi=None):
-    '''Capture a screenshot of the whole screen by default, or a specific ROI if provided.'''
+def screenshot_roi(roi=None, monitor_index=1):
+    """
+    Capture a screenshot of the whole screen or a specific ROI.
+
+    Args:
+        roi (tuple): (x, y, w, h) region of interest in absolute screen coords.
+        monitor_index (int): Index of the monitor to capture (1 = primary).
+
+    Returns:
+        np.ndarray: BGR image from the captured region.
+    """
     with mss() as sct:
-        # Use the first monitor (index 1); adjust if needed
-        monitor = sct.monitors[1]
+        monitor = sct.monitors[monitor_index]
+        mon_left, mon_top = monitor["left"], monitor["top"]
+        mon_width, mon_height = monitor["width"], monitor["height"]
+
         if roi:
             x, y, w, h = roi
-            monitor = {"top": y, "left": x, "width": w, "height": h}
-        screenshot = sct.grab(monitor)
-        # Convert to numpy array and BGR for OpenCV
-        screen_frame = np.array(screenshot)
-        screen_frame = cv.cvtColor(screen_frame, cv.COLOR_BGRA2BGR)
-    return screen_frame
+            # clip ROI to screen boundaries
+            left = max(mon_left, x)
+            top = max(mon_top, y)
+            right = min(mon_left + mon_width, x + w)
+            bottom = min(mon_top + mon_height, y + h)
+            width = max(0, right - left)
+            height = max(0, bottom - top)
+            capture_region = {"top": top, "left": left, "width": width, "height": height}
+        else:
+            capture_region = monitor
 
-def screenshot_mask(mode="black"):
-    '''Capture a screenshot and return a mask of black areas.'''
+        screenshot = sct.grab(capture_region)
+        frame = np.array(screenshot)
+        frame = cv.cvtColor(frame, cv.COLOR_BGRA2BGR)
+        return frame
+
+
+def screenshot_mask(mode="black", roi=None, monitor_index=1):
+    """
+    Capture a screenshot and return a binary mask of black or white areas.
+
+    Args:
+        mode (str): "black" or "white".
+        roi (tuple): (x, y, w, h) region of interest.
+        monitor_index (int): Monitor index (1 = primary).
+
+    Returns:
+        np.ndarray: Binary mask (255 where matched, 0 elsewhere).
+    """
     with mss() as sct:
-        monitor_roi = sct.monitors[1]
-        screenshot = sct.grab(monitor_roi)
+        monitor = sct.monitors[monitor_index]
+        mon_left, mon_top = monitor["left"], monitor["top"]
+        mon_width, mon_height = monitor["width"], monitor["height"]
+
+        if roi:
+            x, y, w, h = roi
+            # clip ROI to screen boundaries
+            left = max(mon_left, x)
+            top = max(mon_top, y)
+            right = min(mon_left + mon_width, x + w)
+            bottom = min(mon_top + mon_height, y + h)
+            width = max(0, right - left)
+            height = max(0, bottom - top)
+            capture_region = {"top": top, "left": left, "width": width, "height": height}
+        else:
+            capture_region = monitor
+
+        screenshot = sct.grab(capture_region)
         frame = np.array(screenshot)
         frame = cv.cvtColor(frame, cv.COLOR_BGRA2BGR)
 
-        # Convert to HSV
         hsv = cv.cvtColor(frame, cv.COLOR_BGR2HSV)
-        match mode:
-            case "black":
-                # HSV range for black (adjust upper[2] if needed for sensitivity to darkness)
-                lower_black = np.array([0, 0, 0])
-                upper_black = np.array([180, 255, 30])  # Value up to 30 for dark/black areas
 
-                # Create mask: white where black is detected, black elsewhere
-                mask = cv.inRange(hsv, lower_black, upper_black)
-            case "white":
-                # HSV range for white (adjust lower[2] if needed for sensitivity to brightness)
-                lower_white = np.array([0, 0, 200])  # Value from 200 for bright/white areas
-                upper_white = np.array([180, 25, 255])  # Saturation up to 25 for low color areas
+        if mode == "black":
+            lower_black = np.array([0, 0, 0])
+            upper_black = np.array([180, 255, 35])  # tweak brightness cutoff as needed
+            mask = cv.inRange(hsv, lower_black, upper_black)
+        elif mode == "white":
+            lower_white = np.array([0, 0, 200])
+            upper_white = np.array([180, 40, 255])
+            mask = cv.inRange(hsv, lower_white, upper_white)
+        else:
+            raise ValueError("Invalid mode. Use 'black' or 'white'.")
 
-                # Create mask: white where white is detected, black elsewhere
-                mask = cv.inRange(hsv, lower_white, upper_white)
-            case _:
-                raise ValueError("Invalid mode. Use 'black' or 'white'.")
-
-        # Return the mask
         return mask
 
-def determine_player_angle(avatar_image_front, avatar_image_back, avatar_image_left, avatar_image_right, screenshot=None):
-    """
-    Determine the angle of the player avatar using ORB feature matching.
+class RodAngleTracker:
+    def __init__(self, alpha=0.2):
+        """
+        alpha = smoothing factor (0 < alpha ≤ 1)
+        smaller alpha = smoother but more lag
+        """
+        self.alpha = alpha
+        self.smoothed_angle = None
 
-    Args:
-        avatar_image_front (str): Path to the front view image of the avatar.
-        avatar_image_back (str): Path to the back view image of the avatar.
-        avatar_image_left (str): Path to the left view image of the avatar.
-        avatar_image_right (str): Path to the right view image of the avatar.
-        screenshot (numpy array): Optional screenshot image. If None, a new screenshot will be taken.
+    def determine_avatar_angle(self, frame):
+        """
+        Detect penguin center and fishing rod tip, then calculate smoothed facing angle.
+        Returns (smoothed_angle, raw_angle, penguin_center, rod_tip)
+        """
+        hsv = cv.cvtColor(frame, cv.COLOR_BGR2HSV)
 
-    Returns:
-        float: Angle in degrees (0 = front, 90 = right, 180 = back, 270 = left), or None if not found.
-    """
-    # Load avatar images
-    img_front = cv.imread(avatar_image_front, cv.IMREAD_GRAYSCALE)
-    img_back = cv.imread(avatar_image_back, cv.IMREAD_GRAYSCALE)
-    img_left = cv.imread(avatar_image_left, cv.IMREAD_GRAYSCALE)
-    img_right = cv.imread(avatar_image_right, cv.IMREAD_GRAYSCALE)
+        # --- Detect penguin (white belly) ---
+        lower_white = np.array([0, 0, 150])
+        upper_white = np.array([180, 60, 255])
+        penguin_mask = cv.inRange(hsv, lower_white, upper_white)
+        penguin_mask = cv.morphologyEx(penguin_mask, cv.MORPH_OPEN, np.ones((5, 5), np.uint8))
+        penguin_mask = cv.morphologyEx(penguin_mask, cv.MORPH_CLOSE, np.ones((7, 7), np.uint8))
 
-    if img_front is None or img_back is None or img_left is None or img_right is None:
-        raise ValueError("One or more avatar images not found or could not be loaded.")
+        contours, _ = cv.findContours(penguin_mask, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE)
+        if not contours:
+            return self.smoothed_angle, None, None, None
 
-    # Take screenshot if not provided
-    if screenshot is None:
-        screenshot = pyautogui.screenshot()
-        screenshot = cv.cvtColor(np.array(screenshot), cv.COLOR_RGB2BGR)
-    gray_screenshot = cv.cvtColor(screenshot, cv.COLOR_BGR2GRAY)
+        penguin_contour = max(contours, key=cv.contourArea)
+        M = cv.moments(penguin_contour)
+        if M["m00"] == 0:
+            return self.smoothed_angle, None, None, None
+        cx = int(M["m10"] / M["m00"])
+        cy = int(M["m01"] / M["m00"])
+        penguin_center = (cx, cy)
 
-    # ORB detector
-    orb = cv.ORB_create(
-        nfeatures=2000,
-        scaleFactor=1.2,
-        nlevels=8,
-        edgeThreshold=31,
-        fastThreshold=20
-    )
+        # --- Detect fishing rod ---
+        lower_rod = np.array([10, 60, 40])
+        upper_rod = np.array([30, 255, 255])
+        rod_mask = cv.inRange(hsv, lower_rod, upper_rod)
+        rod_mask = cv.morphologyEx(rod_mask, cv.MORPH_OPEN, np.ones((3, 3), np.uint8))
+        rod_mask = cv.morphologyEx(rod_mask, cv.MORPH_CLOSE, np.ones((5, 5), np.uint8))
 
-    # Detect keypoints and descriptors
-    kp_front, des_front = orb.detectAndCompute(img_front, None)
-    kp_back, des_back = orb.detectAndCompute(img_back, None)
-    kp_left, des_left = orb.detectAndCompute(img_left, None)
-    kp_right, des_right = orb.detectAndCompute(img_right, None)
-    kp_screenshot, des_screenshot = orb.detectAndCompute(gray_screenshot, None)
+        contours, _ = cv.findContours(rod_mask, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE)
+        if not contours:
+            return self.smoothed_angle, None, penguin_center, None
 
-    if des_screenshot is None:
-        return None
+        rod_contour = max(contours, key=cv.contourArea)
+        rod_tip = tuple(rod_contour[rod_contour[:, :, 1].argmin()][0])
 
-    # BFMatcher
-    bf = cv.BFMatcher(cv.NORM_HAMMING, crossCheck=True)
+        # --- Compute raw angle ---
+        dx = rod_tip[0] - penguin_center[0]
+        dy = penguin_center[1] - rod_tip[1]
+        raw_angle = (np.degrees(np.arctan2(dy, dx)) + 360) % 360
 
-    # Match descriptors
-    matches_front = bf.match(des_front, des_screenshot)
-    matches_back = bf.match(des_back, des_screenshot)
-    matches_left = bf.match(des_left, des_screenshot)
-    matches_right = bf.match(des_right, des_screenshot)
+        # --- Smooth angle ---
+        if self.smoothed_angle is None:
+            self.smoothed_angle = raw_angle
+        else:
+            # handle wrap-around near 0/360 to avoid 359→1 jumps
+            delta = ((raw_angle - self.smoothed_angle + 540) % 360) - 180
+            self.smoothed_angle = (self.smoothed_angle + self.alpha * delta) % 360
 
-    # Determine which has more good matches
-    num_matches = {
-        "front": len(matches_front),
-        "back": len(matches_back),
-        "left": len(matches_left),
-        "right": len(matches_right)
-    }
-    max_side = max(num_matches, key=num_matches.get)
+        return self.smoothed_angle, raw_angle, penguin_center, rod_tip
+    
+def determine_avatar_angle():
+    '''Determine the angle of the avatar based on the white areas in the mask, in degrees.
+    Returns the degree the avatar is facing.'''
+    mask = screenshot_mask(mode="white")
+    h, w = mask.shape
+    left_half = mask[:, :w//2]
+    right_half = mask[:, w//2:]
 
-    if num_matches[max_side] == 0:
-        return None
+    left_white = cv.countNonZero(left_half)
+    right_white = cv.countNonZero(right_half)
+    total_white = left_white + right_white
 
-    # Map sides to angles
-    angle_map = {
-        "front": 0,
-        "right": 90,
-        "back": 180,
-        "left": 270
-    }
-
-    return angle_map[max_side]
+    if total_white == 0:
+        # The penguin is facing completely away (no white detected)
+        return 180
+    else:
+        # Calculate the angle based on the ratio of white areas
+        angle = (right_white - left_white) / total_white * 90  # Scale to -90 to +90 degrees
+        return angle
 
 def locate_splashes_orb(image_path=None, roi=(400, 300, 600, 200), threshold=10):
     """
