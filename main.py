@@ -27,9 +27,15 @@
 - Fixed bug in screen capture using Jean's code from ImageCap.py.
 - added new module loading function to condense code.
 - made a working angle detection class - uses the white mask to find the penguin's general direction, and fishing rod to determine tilt angle.
-
+20251017:
+- Built a VisionCortex class to encapsulate vision functions.
+- Corrected splash ROI to be dynamic based on screen size.
+- Began function to rotate avatar toward splash point (control module).
+- Made player rotate until facing away from camera at start of main loop.
 '''
 '''To Do:
+
+- correct splash function to actually work reliably *or at all* (vision module)
 
 - create function to rotate avatar to face fish (control module)
 
@@ -113,7 +119,7 @@ def launch_tux_fisher(delay=5, fullscreen=True):
                 fullscreen_location = pyautogui.locateCenterOnScreen(str(fullscreen_button), confidence=0.8)
                 if fullscreen_location:
                     pyautogui.click(fullscreen_location)
-                    time.sleep(2) # Wait for the game to go fullscreen
+                    time.sleep(3) # Wait for the game to go fullscreen
                 else:
                     print("Fullscreen button not found on screen.")
             except Exception as e:
@@ -130,10 +136,11 @@ def main():
     # make modules accessible globally
     global control, vision, debug
 
-    # load the control module
-    control = loadModule("control")
     # load the vision module
     vision = loadModule("vision")
+    eyes = vision.VisionCortex(debug=True) # initialize vision class with debug mode on
+    # load the control module
+    control = loadModule("control")
     # load the debug module (not to be included in final build)
     debug = loadModule("debug")
 
@@ -142,24 +149,29 @@ def main():
     
     control.enterWindow() # Ensure the game window is active
 
-    # Start the debug overlay (not to be included in final build)
-    debug.RodAngleTracker().run()
-    
+    direction = True # assume starting facing toward the camera
+    angle = 0.0
 
-    # # run for 30 seconds and locate splashes
-    # start_time = time.time()
-    # while time.time() - start_time < 10:
-    #     # # Locate splashes using ORB
-    #     # points = vision.locate_splashes_orb(roi=(0, 300, 2600, 300))
-    #     # if points:
-    #     #     for point in points:
-    #     #         print(f"Splash found at {point} using ORB")
-    #     # else:
-    #     #     print("No splashes found using ORB")
-    #     # find player angle
-    #     angle = vision.determine_avatar_angle()
-    #     print(f"Player angle: {angle} degrees")
-    #     time.sleep(0.1) # Wait before next search
+    while direction or angle < 100: # Rotate away from camera until facing away
+        ad = eyes.update_player_detector()
+        angle, direction = control.rotate_away(ad)
+
+    # run for 30 seconds and locate splashes
+    start_time = time.time()
+    while time.time() - start_time < 30:
+
+        # find player angle
+        angle, direction = eyes.update_player_detector()
+
+        # Locate splashes using ORB
+        point = eyes.update_splash_detector()
+        
+        # If a splash is found, rotate toward it
+        if point:
+            splash_x, splash_y = point
+            control.rotate_toward_splash(splash_x, splash_y, angle, direction)
+        
+        time.sleep(0.1) # Wait before next search
 
 if __name__ == "__main__":
     main()
