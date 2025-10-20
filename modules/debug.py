@@ -7,6 +7,7 @@ import pyautogui
 from PyQt5 import QtWidgets, QtGui, QtCore
 import vision
 
+
 class FishOverlay(QtWidgets.QWidget):
     def __init__(self, x, y, w, h, threshold=15, fps=10, log_size=8):
         super().__init__()
@@ -17,13 +18,14 @@ class FishOverlay(QtWidgets.QWidget):
                             QtCore.Qt.Tool)
         self.setAttribute(QtCore.Qt.WA_TranslucentBackground)
 
-        # ROI
+        # ROI (Region of Interest)
         self.roi = [x, y, w, h]
         self.threshold = threshold
         self.log = []           # text log of detections
         self.log_size = log_size
+        self.last_detection = None  # (x, y) for visual marker
 
-        # ORB
+        # ORB (more sensitive)
         self.orb = cv.ORB_create(
             nfeatures=3000,
             scaleFactor=1.1,
@@ -32,7 +34,7 @@ class FishOverlay(QtWidgets.QWidget):
             fastThreshold=10
         )
 
-        # Timer
+        # Timer (for real-time updates)
         self.timer = QtCore.QTimer()
         self.timer.timeout.connect(self.update_overlay)
         self.timer.start(int(1000/fps))
@@ -68,15 +70,23 @@ class FishOverlay(QtWidgets.QWidget):
         kp, des = self.orb.detectAndCompute(gray, None)
 
         detected = False
+        detection_point = None
+
         if kp:
             x, y, w, h = self.roi
-            inside = [p for p in kp if x <= p.pt[0] <= x+w and y <= p.pt[1] <= y+h]
+            inside = [(p.pt[0], p.pt[1]) for p in kp if x <= p.pt[0] <= x+w and y <= p.pt[1] <= y+h]
+
             if len(inside) >= self.threshold:
                 detected = True
+                # Average keypoint positions as detection center
+                avg_x = int(np.mean([p[0] for p in inside]))
+                avg_y = int(np.mean([p[1] for p in inside]))
+                detection_point = (avg_x, avg_y + 30)  # draw slightly below ROI
 
         # Update log
         if detected:
-            msg = f"[{QtCore.QTime.currentTime().toString()}] Fish detected in ROI!"
+            self.last_detection = detection_point
+            msg = f"[{QtCore.QTime.currentTime().toString()}] Fish detected at {detection_point}"
             self.log.append(msg)
         else:
             msg = f"[{QtCore.QTime.currentTime().toString()}] No fish."
@@ -98,7 +108,17 @@ class FishOverlay(QtWidgets.QWidget):
         painter.setPen(QtGui.QPen(QtGui.QColor(0, 0, 255, 200), 2))
         painter.drawRect(x, y, w, h)
 
-        # Draw log text bottom-left
+        # Draw detection marker
+        if self.last_detection:
+            fx, fy = self.last_detection
+            painter.setBrush(QtGui.QColor(255, 0, 0, 220))
+            painter.setPen(QtGui.QPen(QtGui.QColor(255, 0, 0, 200), 2))
+            painter.drawEllipse(QtCore.QPoint(fx, fy), 8, 8)
+            painter.setPen(QtGui.QPen(QtGui.QColor(255, 255, 255, 220)))
+            painter.setFont(QtGui.QFont("Consolas", 12))
+            painter.drawText(fx + 15, fy + 5, f"({fx}, {fy})")
+
+        # Draw text log bottom-left
         screen = QtWidgets.QApplication.primaryScreen().geometry()
         painter.setFont(QtGui.QFont("Consolas", 12))
         y_offset = screen.height() - 20

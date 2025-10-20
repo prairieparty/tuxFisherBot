@@ -154,14 +154,45 @@ def main():
 
     while direction or angle < 100: # Rotate away from camera until facing away
         ad = eyes.update_player_detector()
-        angle, direction = control.rotate_away(ad)
+        try:
+            angle, direction = control.rotate_away(ad)
+        except Exception as e:
+            print(f"Error rotating away: {e}")
 
-    # run for 30 seconds and locate splashes
+    db_w, db_h = vision.get_screen_size() # get screen size for dynamic ROI
+    
+    # Choose which debug overlay to use:
+    
+    # Option 1: Fish detection overlay
+    # from PyQt5 import QtWidgets
+    # import sys
+    # app = QtWidgets.QApplication(sys.argv)
+    # overlay = debug.FishOverlay(0, db_h // 4, db_w, db_h // 8)
+    # overlay.showFullScreen()
+    # sys.exit(app.exec_())
+
+    # Option 2: Player angle detection overlay
+    # player_overlay = debug.PlayerOverlay(player_images, fps=10)
+    # player_overlay.show()
+    
+    # Option 3: Mask overlay (white or black mask debugging)
+    # mask_overlay = debug.MaskOverlay(mode="white", fps=5)
+    # mask_overlay.run()
+    
+    # Option 4: Rod angle tracker overlay
+    # rod_tracker = debug.RodAngleTracker(fps=10, alpha=0.25, roi_size=400)
+    # rod_tracker.show()
+
+    # run for 10 seconds and locate splashes
     start_time = time.time()
-    while time.time() - start_time < 30:
+    while time.time() - start_time < 10:
 
         # find player angle
-        angle, direction = eyes.update_player_detector()
+        try:
+            angle, direction = eyes.update_player_detector()
+        except Exception as e:
+            print(f"Error updating player detector: {e}")
+            continue
 
         # Locate splashes using ORB
         point = eyes.update_splash_detector()
@@ -171,7 +202,7 @@ def main():
             splash_x, splash_y = point
             control.rotate_toward_splash(splash_x, splash_y, angle, direction)
         
-        time.sleep(0.1) # Wait before next search
+        time.sleep(0.01) # Wait before next search
 
 if __name__ == "__main__":
     main()

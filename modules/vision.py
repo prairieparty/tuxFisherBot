@@ -98,7 +98,7 @@ class VisionCortex():
         self.splashROI = (0, 
                           self.screen_size[1]//4, 
                           self.screen_size[0], 
-                          self.screen_size[1]//4)  # x, y, w, h
+                          self.screen_size[1]//8)  # x, y, w, h
         
         self.splashThreshold = 15 # number of keypoints to confirm splash
 
@@ -132,29 +132,44 @@ class VisionCortex():
         self.upper_white = np.array([180, 50, 255])
 
     def update_splash_detector(self):
-        """Run splash detection on the current screen."""
+        """Run splash detection on the current screen and return splash coordinates if detected."""
+        # Capture the region of interest (waterline area)
         frame = screenshot_roi(roi=self.splashROI)
         gray = cv.cvtColor(frame, cv.COLOR_BGR2GRAY)
+
+        # Detect ORB keypoints in the ROI
         kp, des = self.splashOrb.detectAndCompute(gray, None)
 
         detected = False
+        detection_point = None
+
         if kp:
             x, y, w, h = self.splashROI
-            inside = [p for p in kp if x <= p.pt[0] <= x+w and y <= p.pt[1] <= y+h]
+            inside = [(p.pt[0], p.pt[1]) for p in kp if x <= p.pt[0] <= x + w and y <= p.pt[1] <= y + h]
+
+            # If we have enough keypoints, mark detection
             if len(inside) >= self.splashThreshold:
                 detected = True
-                if self.debug: print(f"Splash detected with {len(inside)} keypoints inside ROI.")
-            elif self.debug: print(f"{len(inside)} keypoints found inside ROI; below threshold.")
+                avg_x = int(np.mean([p[0] for p in inside]))
+                avg_y = int(np.mean([p[1] for p in inside]))
+                detection_point = (avg_x, avg_y + 30)  # small offset below ROI for realism
 
-        # Return the point the splash occurs at if detected; average of keypoints inside ROI
-        if detected:
-            avg_x = sum(p.pt[0] for p in inside) / len(inside)
-            avg_y = sum(p.pt[1] for p in inside) / len(inside)
-            if self.debug: print(f"Splash point avg. detected at ({avg_x}, {avg_y})")
-            return (avg_x, avg_y)
+                # Update persistent state
+                self.last_splash_point = detection_point
+
+                if self.debug:
+                    print(f"[Splash Detected] {len(inside)} keypoints → ({avg_x}, {avg_y})")
+
+            elif self.debug:
+                print(f"[Splash Scan] {len(inside)} keypoints in ROI (threshold: {self.splashThreshold})")
+
         else:
-            if self.debug: print("No splash detected.")
-            return None
+            if self.debug:
+                print("[Splash Scan] No keypoints found in frame.")
+
+        # Return the detection point or None
+        return detection_point if detected else None
+
         
     def update_player_detector(self):
         """Run player angle detection on the current screen."""
