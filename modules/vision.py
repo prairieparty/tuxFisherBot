@@ -111,12 +111,14 @@ class VisionCortex():
         )
 
         # initialize player angle detector
+        pengX = int(self.screen_center[0] - (self.screen_size[0]//6.4) // 2)
+        pengY = int(self.screen_center[1] - (self.screen_size[1]//4) // 2)
 
-        self.penguinROI = (self.screen_center[0]-self.screen_size[0]//8,
-                           self.screen_center[1]-self.screen_size[1]//8, 
-                           self.screen_size[0]//4, 
-                           self.screen_size[1]//4)  # x, y, w, h
-        
+        self.penguinROI = (pengX,
+                           pengY,
+                           int(self.screen_size[0]//6.4),
+                           int(self.screen_size[1]//4))  # x, y, w, h
+
         self.penguin_alpha = 0.25 # smoothing factor for angle updates
         self.penguin_center = None # penguin center point, dynamically updated
         self.rod_tip = None # fishing rod tip point, dynamically updated
@@ -130,6 +132,9 @@ class VisionCortex():
         self.upper_rod = np.array([35, 255, 255])
         self.lower_white = np.array([0, 0, 180])
         self.upper_white = np.array([180, 50, 255])
+        self.lower_orange = np.array([5, 150, 150])
+        self.upper_orange = np.array([15, 255, 255])
+        self.whitePercentageThreshold = 0.03 # threshold for white belly detection
 
     def update_splash_detector(self):
         """Run splash detection on the current screen and return splash coordinates if detected."""
@@ -230,7 +235,7 @@ class VisionCortex():
         roi_center = mask_white[h // 3 : h, w // 3 : 2 * w // 3]
         white_ratio = cv.countNonZero(roi_center) / roi_center.size
 
-        self.facing_forward = white_ratio > 0.05  # threshold ~5% white pixels
+        self.facing_forward = white_ratio > self.whitePercentageThreshold
 
         # --- 4. Compute rod angle relative to penguin center ---
         dx = rod_tip[0] - self.penguin_center[0]
@@ -247,6 +252,18 @@ class VisionCortex():
         else:
             delta = ((raw_angle - self.smoothed_angle + 540) % 360) - 180
             self.smoothed_angle = (self.smoothed_angle + self.penguin_alpha * delta) % 360
+
+        # --- 6. Set the angle to a flat 90 if there are even amounts of orange pixels on left and right sides of ROI ---
+        mask_orange = cv.inRange(hsv, self.lower_orange, self.upper_orange)
+        orange_count = cv.countNonZero(mask_orange)
+        if orange_count > 0:
+            h, w = mask_orange.shape
+            left_half = mask_orange[:, : w // 2]
+            right_half = mask_orange[:, w // 2 :]
+            left_count = cv.countNonZero(left_half)
+            right_count = cv.countNonZero(right_half)
+            if abs(left_count - right_count) / orange_count < 0.1:  # within 10%
+                self.smoothed_angle = 90.0
 
         if self.debug: print(f"Angle: {self.smoothed_angle:.1f}°, facing {'forward' if self.facing_forward else 'backward'}.")
         return self.smoothed_angle, self.facing_forward

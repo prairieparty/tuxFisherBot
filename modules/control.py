@@ -5,11 +5,11 @@ import time
 
 def enterWindow():
     '''Clicks the penguin to ensure the game window is active.'''
-    screen_width, screen_height = vision.get_center_of_screen()
+    screen_width, screen_height = vision.get_screen_size()
     # move mouse to center before clicking
-    pyautogui.moveTo(screen_width // 2, screen_height // 2)
+    pyautogui.moveTo(screen_width // 2, screen_height // 2, duration=0.2)
     time.sleep(0.1)
-    pyautogui.click(screen_width // 2, screen_height // 2)
+    pyautogui.click(screen_width // 2, screen_height // 4)
     # drag the mouse down a little bit from the center point so the penguin is looking dead on
     # pyautogui.move(0, 50, duration=0.2)
 
@@ -24,12 +24,12 @@ def rotate_away(ad):
         direction (bool): The new direction the penguin is facing after rotation.
     '''
     angle, direction = ad
-    match direction or angle < 100:
+    match direction or abs(angle-90) > 2:
         case True:  # facing toward the camera
             pyautogui.keyDown('right')
         case False:  # facing away from the camera
             pyautogui.keyUp('right')
-    time.sleep(0.2)
+    time.sleep(0.002)
 
     return angle, direction # return the current direction
 

@@ -32,10 +32,15 @@
 - Corrected splash ROI to be dynamic based on screen size.
 - Began function to rotate avatar toward splash point (control module).
 - Made player rotate until facing away from camera at start of main loop.
+20251021:
+- Corrected splash function to actually work reliably.
+- Reduced sleep times in control module to speed up rotation.
+- Began correcting angle tolerances in control module for initial rotation.
+- Corrected initial click to properly click the center - prior bug clicked in the top left quadrant.
 '''
 '''To Do:
 
-- correct splash function to actually work reliably *or at all* (vision module)
+- correct initial rotation to face away from camera (control module)
 
 - create function to rotate avatar to face fish (control module)
 
@@ -152,14 +157,13 @@ def main():
     direction = True # assume starting facing toward the camera
     angle = 0.0
 
-    while direction or angle < 100: # Rotate away from camera until facing away
+    while direction or abs(angle-90) > 2: # Rotate away from camera until facing away
         ad = eyes.update_player_detector()
         try:
             angle, direction = control.rotate_away(ad)
         except Exception as e:
             print(f"Error rotating away: {e}")
-
-    db_w, db_h = vision.get_screen_size() # get screen size for dynamic ROI
+    print(f"Finished rotating away: angle={angle:.1f}°, direction={'forward' if direction else 'backward'}.")
     
     # Choose which debug overlay to use:
     
@@ -167,42 +171,36 @@ def main():
     # from PyQt5 import QtWidgets
     # import sys
     # app = QtWidgets.QApplication(sys.argv)
+    # db_w, db_h = vision.get_screen_size()
     # overlay = debug.FishOverlay(0, db_h // 4, db_w, db_h // 8)
     # overlay.showFullScreen()
     # sys.exit(app.exec_())
-
-    # Option 2: Player angle detection overlay
-    # player_overlay = debug.PlayerOverlay(player_images, fps=10)
-    # player_overlay.show()
-    
-    # Option 3: Mask overlay (white or black mask debugging)
-    # mask_overlay = debug.MaskOverlay(mode="white", fps=5)
-    # mask_overlay.run()
     
     # Option 4: Rod angle tracker overlay
-    # rod_tracker = debug.RodAngleTracker(fps=10, alpha=0.25, roi_size=400)
-    # rod_tracker.show()
+    rod_tracker = debug.RodAngleTracker(fps=10, alpha=0.25, roi_size=400)
+    rod_tracker.run()
+    rod_tracker.show()
 
     # run for 10 seconds and locate splashes
-    start_time = time.time()
-    while time.time() - start_time < 10:
+    # start_time = time.time()
+    # while time.time() - start_time < 10:
 
-        # find player angle
-        try:
-            angle, direction = eyes.update_player_detector()
-        except Exception as e:
-            print(f"Error updating player detector: {e}")
-            continue
+    #     # find player angle
+    #     try:
+    #         angle, direction = eyes.update_player_detector()
+    #     except Exception as e:
+    #         print(f"Error updating player detector: {e}")
+    #         continue
 
-        # Locate splashes using ORB
-        point = eyes.update_splash_detector()
+    #     # Locate splashes using ORB
+    #     point = eyes.update_splash_detector()
         
-        # If a splash is found, rotate toward it
-        if point:
-            splash_x, splash_y = point
-            control.rotate_toward_splash(splash_x, splash_y, angle, direction)
+    #     # If a splash is found, rotate toward it
+    #     if point:
+    #         splash_x, splash_y = point
+    #         control.rotate_toward_splash(splash_x, splash_y, angle, direction)
         
-        time.sleep(0.01) # Wait before next search
+    #     time.sleep(0.01) # Wait before next search
 
 if __name__ == "__main__":
     main()
