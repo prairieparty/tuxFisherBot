@@ -82,11 +82,17 @@ class FishOverlay(QtWidgets.QWidget):
                 avg_x = int(np.mean([p[0] for p in inside]))
                 avg_y = int(np.mean([p[1] for p in inside]))
                 detection_point = (avg_x, avg_y + 30)  # draw slightly below ROI
+                # Angle from center
+                center_x = x + w // 2
+                center_y = y + h // 2
+                detection_angle = math.degrees(math.atan2(avg_y - center_y, avg_x - center_x))
+                detection_angle = ((detection_angle + 270) % 360)/2
 
         # Update log
         if detected:
             self.last_detection = detection_point
-            msg = f"[{QtCore.QTime.currentTime().toString()}] Fish detected at {detection_point}"
+            self.last_detection_angle = detection_angle
+            msg = f"[{QtCore.QTime.currentTime().toString()}] Fish detected at {detection_point} with angle {detection_angle:.1f}°."
             self.log.append(msg)
         else:
             msg = f"[{QtCore.QTime.currentTime().toString()}] No fish."
@@ -111,12 +117,13 @@ class FishOverlay(QtWidgets.QWidget):
         # Draw detection marker
         if self.last_detection:
             fx, fy = self.last_detection
+            angle = self.last_detection_angle
             painter.setBrush(QtGui.QColor(255, 0, 0, 220))
             painter.setPen(QtGui.QPen(QtGui.QColor(255, 0, 0, 200), 2))
             painter.drawEllipse(QtCore.QPoint(fx, fy), 8, 8)
             painter.setPen(QtGui.QPen(QtGui.QColor(255, 255, 255, 220)))
             painter.setFont(QtGui.QFont("Consolas", 12))
-            painter.drawText(fx + 15, fy + 5, f"({fx}, {fy})")
+            painter.drawText(fx + 15, fy + 5, f"({fx}, {fy}), {angle:.1f}°")
 
         # Draw text log bottom-left
         screen = QtWidgets.QApplication.primaryScreen().geometry()

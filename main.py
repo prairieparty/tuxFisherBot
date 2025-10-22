@@ -37,18 +37,24 @@
 - Reduced sleep times in control module to speed up rotation.
 - Began correcting angle tolerances in control module for initial rotation.
 - Corrected initial click to properly click the center - prior bug clicked in the top left quadrant.
+20251022:
+- Finished correcting initial rotation to face away from camera.
+- Continued developing function to rotate avatar toward splash point.
+- Redefined various control functions to use the VisionCortex class, rather than preset angle & direction variables.
+- Improved error handling and logging for vision updates.
+- Finally properly resolved initial click bug - used mouseDown and mouseUp instead of click().
+- Adjusted thresholds for splash detection in vision module.
+- Began developing cast_rod function to cast based on distance to splash point.
+- The test caught its first fish!
+- Added angle reporting to the debug overlay.
 '''
 '''To Do:
 
-- correct initial rotation to face away from camera (control module)
-
-- create function to rotate avatar to face fish (control module)
+- refine function to rotate avatar to face fish (control module)
 
 - determine distance to fish (vision module)
 
-- create function to cast line (control module)
-
-- create "search" mode to look around the environment for fish (if it doesn't introduce false positives into ORB detection)
+- refine search function to find splashes more reliably (vision module)
 
 '''
 
@@ -143,7 +149,7 @@ def main():
 
     # load the vision module
     vision = loadModule("vision")
-    eyes = vision.VisionCortex(debug=True) # initialize vision class with debug mode on
+    eyes = vision.VisionCortex() # initialize vision class with debug mode on
     # load the control module
     control = loadModule("control")
     # load the debug module (not to be included in final build)
@@ -157,13 +163,13 @@ def main():
     direction = True # assume starting facing toward the camera
     angle = 0.0
 
-    while direction or abs(angle-90) > 2: # Rotate away from camera until facing away
-        ad = eyes.update_player_detector()
-        try:
-            angle, direction = control.rotate_away(ad)
-        except Exception as e:
-            print(f"Error rotating away: {e}")
-    print(f"Finished rotating away: angle={angle:.1f}°, direction={'forward' if direction else 'backward'}.")
+    # while direction or abs(angle-90) > 2: # Rotate away from camera until facing away
+    #     ad = eyes.update_player_detector()
+    #     try:
+    #         angle, direction = control.rotate_away(ad)
+    #     except Exception as e:
+    #         print(f"Error rotating away: {e}")
+    # print(f"Finished rotating away: angle={angle:.1f}°, direction={'forward' if direction else 'backward'}.")
     
     # Choose which debug overlay to use:
     
@@ -172,35 +178,29 @@ def main():
     # import sys
     # app = QtWidgets.QApplication(sys.argv)
     # db_w, db_h = vision.get_screen_size()
-    # overlay = debug.FishOverlay(0, db_h // 4, db_w, db_h // 8)
+    # overlay = debug.FishOverlay(0, db_h // 8, db_w, db_h // 4)
     # overlay.showFullScreen()
     # sys.exit(app.exec_())
     
-    # Option 4: Rod angle tracker overlay
-    rod_tracker = debug.RodAngleTracker(fps=10, alpha=0.25, roi_size=400)
-    rod_tracker.run()
-    rod_tracker.show()
+    # Option 2: Rod angle tracker overlay
+    # rod_tracker = debug.RodAngleTracker(fps=10, alpha=0.25, roi_size=400)
+    # rod_tracker.run()
+    # rod_tracker.show()
 
-    # run for 10 seconds and locate splashes
-    # start_time = time.time()
-    # while time.time() - start_time < 10:
+    # run for 120 seconds and locate splashes
+    start_time = time.time()
+    while time.time() - start_time < 120:  # run for 120 seconds
 
-    #     # find player angle
-    #     try:
-    #         angle, direction = eyes.update_player_detector()
-    #     except Exception as e:
-    #         print(f"Error updating player detector: {e}")
-    #         continue
+        # Locate splashes using ORB
+        point = control.searching(eyes, debug=True)
 
-    #     # Locate splashes using ORB
-    #     point = eyes.update_splash_detector()
+        # If a splash is found, rotate toward it
+        if point:
+            splash_x, splash_y = point
+            control.rotate_toward_splash((splash_x, splash_y), eyes)
+            control.cast_rod((splash_x, splash_y), debug=True)
         
-    #     # If a splash is found, rotate toward it
-    #     if point:
-    #         splash_x, splash_y = point
-    #         control.rotate_toward_splash(splash_x, splash_y, angle, direction)
-        
-    #     time.sleep(0.01) # Wait before next search
+        time.sleep(0.001) # Wait before next search
 
 if __name__ == "__main__":
     main()

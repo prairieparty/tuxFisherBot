@@ -96,11 +96,11 @@ class VisionCortex():
         # initialize splash detector
 
         self.splashROI = (0, 
-                          self.screen_size[1]//4, 
+                          self.screen_size[1]//8, 
                           self.screen_size[0], 
-                          self.screen_size[1]//8)  # x, y, w, h
+                          self.screen_size[1]//4)  # x, y, w, h
         
-        self.splashThreshold = 15 # number of keypoints to confirm splash
+        self.splashThreshold = 100 # number of keypoints to confirm splash
 
         self.splashOrb = cv.ORB_create(
             nfeatures=3000,
@@ -134,12 +134,13 @@ class VisionCortex():
         self.upper_white = np.array([180, 50, 255])
         self.lower_orange = np.array([5, 150, 150])
         self.upper_orange = np.array([15, 255, 255])
-        self.whitePercentageThreshold = 0.03 # threshold for white belly detection
+        self.whitePercentageThreshold = 0.04 # threshold for white belly detection
 
     def update_splash_detector(self):
         """Run splash detection on the current screen and return splash coordinates if detected."""
         # Capture the region of interest (waterline area)
-        frame = screenshot_roi(roi=self.splashROI)
+        ss = pyautogui.screenshot()
+        frame = cv.cvtColor(np.array(ss), cv.COLOR_RGB2BGR)
         gray = cv.cvtColor(frame, cv.COLOR_BGR2GRAY)
 
         # Detect ORB keypoints in the ROI
@@ -157,7 +158,7 @@ class VisionCortex():
                 detected = True
                 avg_x = int(np.mean([p[0] for p in inside]))
                 avg_y = int(np.mean([p[1] for p in inside]))
-                detection_point = (avg_x, avg_y + 30)  # small offset below ROI for realism
+                detection_point = (avg_x, avg_y)  # small offset below ROI for realism
 
                 # Update persistent state
                 self.last_splash_point = detection_point
@@ -174,8 +175,7 @@ class VisionCortex():
 
         # Return the detection point or None
         return detection_point if detected else None
-
-        
+   
     def update_player_detector(self):
         """Run player angle detection on the current screen."""
         frame = screenshot_roi(roi=self.penguinROI)
