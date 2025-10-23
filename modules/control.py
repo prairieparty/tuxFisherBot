@@ -71,8 +71,6 @@ def rotate_away(ad):
 #     pyautogui.keyUp('left')
 #     print(f"Final angle: {angle:.1f}°, facing {'forward' if not direction else 'toward camera'}, diff={diff:.1f}°")
 
-import math, time, pyautogui, vision
-
 def rotate_toward_splash(point, visual, tolerance=5, max_time=3.0):
     """
     Rotate the penguin toward a splash point using folded angle input.
