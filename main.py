@@ -47,6 +47,12 @@
 - Began developing cast_rod function to cast based on distance to splash point.
 - The test caught its first fish!
 - Added angle reporting to the debug overlay.
+20251023:
+- Redefined angle measurement in rotate_toward_splash function
+-- So it's better, but still pretty awful.
+- Cleaned up imports
+- Made a pygame debugger to test out angle measurement
+-- Made a .gitignore so said file doesn't take up space
 '''
 '''To Do:
 
@@ -60,9 +66,6 @@
 
 # IMPORTS
 
-import cv2 as cv
-from mss import mss
-import numpy as np
 import pyautogui
 import time
 import os
@@ -199,6 +202,7 @@ def main():
             splash_x, splash_y = point
             control.rotate_toward_splash((splash_x, splash_y), eyes)
             control.cast_rod((splash_x, splash_y), debug=True)
+            time.sleep(5) # Wait to reel in fish before searching again
         
         time.sleep(0.001) # Wait before next search
 
