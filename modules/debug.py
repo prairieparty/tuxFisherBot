@@ -571,3 +571,120 @@ class RodAngleTracker(QtWidgets.QWidget):
         self.show()
         if self._owns_app:
             sys.exit(self.app.exec_())
+
+class FishingHUDOverlay(QtWidgets.QWidget):
+    def __init__(self, fps=10):
+        app = QtWidgets.QApplication.instance()
+        self._owns_app = False
+        if app is None:
+            app = QtWidgets.QApplication(sys.argv)
+            self._owns_app = True
+        self.app = app
+        super().__init__()
+
+        # Vision backend
+        self.vision = vision.VisionCortex(debug=False)
+
+        # UI setup
+        self.setWindowFlags(QtCore.Qt.FramelessWindowHint |
+                            QtCore.Qt.WindowStaysOnTopHint |
+                            QtCore.Qt.Tool)
+        self.setAttribute(QtCore.Qt.WA_TranslucentBackground)
+        self.setWindowFlag(QtCore.Qt.WindowTransparentForInput, True)
+
+        self.setGeometry(0, 0, *self.vision.screen_size)
+        self.fish_log = []
+        self.log_size = 6
+        self.last_fish = None
+        self.splash_angle = None
+        self.last_angle = 0
+        self.direction_label = "?"
+
+        # Timer
+        self.timer = QtCore.QTimer()
+        self.timer.timeout.connect(self.update_overlay)
+        self.timer.start(int(1000 / fps))
+
+        # Exit
+        QtWidgets.QShortcut(QtGui.QKeySequence("Q"), self, activated=self.close)
+        QtWidgets.QShortcut(QtGui.QKeySequence("Esc"), self, activated=self.close)
+
+    def update_overlay(self):
+        splash_data = self.vision.update_splash_detector()   # (pt, angle) or None
+        player_data = self.vision.update_player_detector()   # (angle, facing) or None
+
+        if splash_data:
+            (pt, s_ang) = splash_data
+            self.last_fish = pt
+            msg = f"[{QtCore.QTime.currentTime().toString()}] Splash @ {pt}  ∠ {s_ang:.1f}°"
+            self.fish_log.append(msg)
+            self.splash_angle = s_ang
+        else:
+            # optional while tuning:
+            # self.fish_log.append(f"[{QtCore.QTime.currentTime().toString()}] No splash.")
+            pass
+
+        if player_data:
+            angle, facing = player_data
+            self.last_angle = angle
+            self.direction_label = "Forward" if facing else "Away"
+
+        if len(self.fish_log) > self.log_size:
+            self.fish_log = self.fish_log[-self.log_size:]
+
+        self.update()
+
+
+    def paintEvent(self, event):
+        painter = QtGui.QPainter(self)
+        painter.setRenderHint(QtGui.QPainter.Antialiasing)
+
+        # Splash ROI
+        x, y, w, h = self.vision.splashROI
+        painter.setPen(QtGui.QPen(QtGui.QColor(0, 128, 255, 200), 2))
+        painter.drawRect(x, y, w, h)
+
+        # Fish detection marker
+        if self.last_fish:
+            fx, fy = self.last_fish
+            painter.setBrush(QtGui.QColor(255, 0, 0, 220))
+            painter.drawEllipse(QtCore.QPoint(fx, fy), 8, 8)
+            if self.splash_angle is not None:
+                painter.setFont(QtGui.QFont("Consolas", 12))
+                painter.setPen(QtGui.QColor(255, 255, 255, 230))
+                painter.drawText(fx + 14, fy, f"{self.splash_angle:.1f}°")
+
+
+        # Player angle
+        painter.setFont(QtGui.QFont("Consolas", 16))
+        painter.setPen(QtGui.QColor(255, 255, 255, 230))
+        painter.drawText(20, 40, f"Rod: {self.last_angle:.1f}° ({self.direction_label})")
+
+        # Rod line (if both points known)
+        if self.vision.penguin_center and self.vision.rod_tip:
+            px, py = self.vision.penguin_center
+            rx, ry = self.vision.rod_tip
+            x, y, w, h = self.vision.penguinROI
+            px += x
+            py += y
+            rx += x
+            ry += y
+            painter.setPen(QtGui.QPen(QtGui.QColor(0, 255, 0, 200), 3))
+            painter.drawLine(px, py, rx, ry)
+            painter.setBrush(QtGui.QColor(0, 255, 0))
+            painter.drawEllipse(px - 4, py - 4, 8, 8)
+            painter.setBrush(QtGui.QColor(255, 255, 0))
+            painter.drawEllipse(rx - 4, ry - 4, 8, 8)
+
+        # Log
+        screen = QtWidgets.QApplication.primaryScreen().geometry()
+        painter.setFont(QtGui.QFont("Consolas", 12))
+        y_offset = screen.height() - 20
+        for entry in reversed(self.fish_log):
+            painter.drawText(20, y_offset, entry)
+            y_offset -= 20
+
+    def run(self):
+        self.show()
+        if self._owns_app:
+            sys.exit(self.app.exec_())

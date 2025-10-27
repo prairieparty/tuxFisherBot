@@ -53,14 +53,18 @@
 - Cleaned up imports
 - Made a pygame debugger to test out angle measurement
 -- Made a .gitignore so said file doesn't take up space
+20251027:
+- Redefined splash detector to be more picky (using sklearn's DBSCAN clustering algorithm).
+-- Now it's too picky, needs a lot of work.
+- Further refined angle detector for player character.
+- Added angle calibration script to slowly rotate the avatar and log folded angles over time.
 '''
 '''To Do:
 
-- refine function to rotate avatar to face fish (control module)
-
-- determine distance to fish (vision module)
-
-- refine search function to find splashes more reliably (vision module)
+- refine splash detection to be less picky - currently misses all splashes when searching
+-- works perfectly fine when static, but rotating the camera makes it miss everything
+- test whether splash angle and rod angle use the same reference frame
+- optimize the codebase - there's probably a lot of redundant code and imports
 
 '''
 
@@ -99,19 +103,6 @@ else:
 image_files = list(Path(images_directory).rglob("*.png")) + list(Path(images_directory).rglob("*.jpg")) # Add more image formats as needed
 # Find fullscreen button image
 fullscreen_button = [img for img in image_files if img.name == "fullscreen_icon.png"][0]
-# Find all images in the player subfolder
-player_images = list(Path(images_directory / "player").rglob("*.png")) + list(Path(images_directory / "player").rglob("*.jpg")) # Add more image formats as needed
-# Reorder player images to start with back & go clockwise
-player_images_ordered = []
-try:
-    assert len(player_images) == 8, "Expected 8 player images (front, back, left, right, NE, NW, SE, SW). Please ensure all are present in the player images directory."
-except AssertionError as e:
-    print(e)
-for name in ["player_front.png", "player_SE.png", "player_right.png", "player_NE.png", "player_back.png", "player_NW.png", "player_left.png", "player_SW.png"]:
-    player_images_ordered.append([img for img in player_images if img.name == name][0])
-player_images = player_images_ordered
-
-
 
 # FUNCTIONS
 
@@ -174,37 +165,27 @@ def main():
     #         print(f"Error rotating away: {e}")
     # print(f"Finished rotating away: angle={angle:.1f}°, direction={'forward' if direction else 'backward'}.")
     
-    # Choose which debug overlay to use:
-    
-    # Option 1: Fish detection overlay
-    # from PyQt5 import QtWidgets
-    # import sys
-    # app = QtWidgets.QApplication(sys.argv)
-    # db_w, db_h = vision.get_screen_size()
-    # overlay = debug.FishOverlay(0, db_h // 8, db_w, db_h // 4)
-    # overlay.showFullScreen()
-    # sys.exit(app.exec_())
-    
-    # Option 2: Rod angle tracker overlay
-    # rod_tracker = debug.RodAngleTracker(fps=10, alpha=0.25, roi_size=400)
-    # rod_tracker.run()
-    # rod_tracker.show()
+    # Debug overlay (not to be included in final build)
+    # overlay = debug.FishingHUDOverlay()
+    # overlay.run()
 
     # run for 120 seconds and locate splashes
     start_time = time.time()
     while time.time() - start_time < 120:  # run for 120 seconds
 
         # Locate splashes using ORB
+        eyes.update_player_detector() # update player angle first
         point = control.searching(eyes, debug=True)
 
         # If a splash is found, rotate toward it
         if point:
-            splash_x, splash_y = point
-            control.rotate_toward_splash((splash_x, splash_y), eyes)
-            control.cast_rod((splash_x, splash_y), debug=True)
-            time.sleep(5) # Wait to reel in fish before searching again
+            (splash_x, splash_y), splash_angle = point
+            control.rotate_toward_splash(splash_angle, eyes)
+            
+            control.cast_rod((splash_x, splash_y))
+            time.sleep(8) # Wait to reel in fish before searching again
         
-        time.sleep(0.001) # Wait before next search
+        time.sleep(0.4) # Wait before next search
 
 if __name__ == "__main__":
     main()

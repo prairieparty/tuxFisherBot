@@ -5,7 +5,9 @@ import pyautogui
 from mss import mss
 import math
 from PyQt5 import QtCore
-from time import sleep
+import time
+from sklearn.cluster import DBSCAN
+from collections import deque
 
 # Module to handle vision-related tasks
 
@@ -110,6 +112,19 @@ class VisionCortex():
             fastThreshold=10
         )
 
+        self.splashThreshold = 60          # base minimum count (you can tune)
+        self.splash_alpha = 0.35           # angle EMA
+        self.splash_point_beta = 0.4       # point EMA
+        self.splash_angle_smooth = None
+        self.splash_point_smooth = None
+
+        # Anti-FP state
+        self._kp_hist = deque(maxlen=30)   # rolling history of kp counts
+        self._last_detect_t = 0.0
+        self._cooldown_sec = 0.35          # refractory period after a detection
+        self._need_confirm = False         # 2-frame confirmation
+        self._pending_pt = None
+
         # initialize player angle detector
         pengX = int(self.screen_center[0] - (self.screen_size[0]//6.4) // 2)
         pengY = int(self.screen_center[1] - (self.screen_size[1]//4) // 2)
@@ -136,46 +151,155 @@ class VisionCortex():
         self.upper_orange = np.array([15, 255, 255])
         self.whitePercentageThreshold = 0.04 # threshold for white belly detection
 
+    def _circular_ema(self, prev_deg, new_deg, alpha):
+        if prev_deg is None:
+            return new_deg
+        diff = ((new_deg - prev_deg + 540) % 360) - 180
+        return (prev_deg + alpha * diff) % 360
+
+    def _robust_centroid(self, xs, ys):
+        # remove outliers with MAD (median absolute deviation)
+        x = np.asarray(xs); y = np.asarray(ys)
+        mx, my = np.median(x), np.median(y)
+        madx = np.median(np.abs(x - mx)) + 1e-6
+        mady = np.median(np.abs(y - my)) + 1e-6
+        keep = (np.abs(x - mx) <= 2.5 * madx) & (np.abs(y - my) <= 2.5 * mady)
+        xk, yk = x[keep], y[keep]
+        if xk.size < 5:   # fall back if we pruned too hard
+            xk, yk = x, y
+        # median is stabler than mean for splashes
+        return int(np.median(xk)), int(np.median(yk))
+
     def update_splash_detector(self):
-        """Run splash detection on the current screen and return splash coordinates if detected."""
-        # Capture the region of interest (waterline area)
-        ss = pyautogui.screenshot()
-        frame = cv.cvtColor(np.array(ss), cv.COLOR_RGB2BGR)
-        gray = cv.cvtColor(frame, cv.COLOR_BGR2GRAY)
+        """
+        Robust splash detection.
+        Returns (screen_point, smoothed_angle_deg) or None.
+        """
+        x, y, w, h = self.splashROI
 
-        # Detect ORB keypoints in the ROI
-        kp, des = self.splashOrb.detectAndCompute(gray, None)
+        # 1) Capture ROI ONLY (prevents overlay/sky noise)
+        with mss() as sct:
+            roi_img = np.array(sct.grab({"top": y, "left": x, "width": w, "height": h}))
+        frame = cv.cvtColor(roi_img, cv.COLOR_BGRA2BGR)
+        gray  = cv.cvtColor(frame, cv.COLOR_BGR2GRAY)
 
-        detected = False
-        detection_point = None
+        # 2) ORB keypoints inside ROI
+        kps, des = self.splashOrb.detectAndCompute(gray, None)
+        kp_count = 0 if not kps else len(kps)
+        self._kp_hist.append(kp_count)
 
-        if kp:
-            x, y, w, h = self.splashROI
-            inside = [(p.pt[0], p.pt[1]) for p in kp if x <= p.pt[0] <= x + w and y <= p.pt[1] <= y + h]
-
-            # If we have enough keypoints, mark detection
-            if len(inside) >= self.splashThreshold:
-                detected = True
-                avg_x = int(np.mean([p[0] for p in inside]))
-                avg_y = int(np.mean([p[1] for p in inside]))
-                detection_point = (avg_x, avg_y)  # small offset below ROI for realism
-
-                # Update persistent state
-                self.last_splash_point = detection_point
-
-                if self.debug:
-                    print(f"[Splash Detected] {len(inside)} keypoints → ({avg_x}, {avg_y})")
-
-            elif self.debug:
-                print(f"[Splash Scan] {len(inside)} keypoints in ROI (threshold: {self.splashThreshold})")
-
+        # 3) Rolling baseline spike test (mean + 3σ) to reject “always busy” water
+        if len(self._kp_hist) >= 10:
+            mu = np.mean(self._kp_hist)
+            sd = np.std(self._kp_hist) + 1e-6
+            spike_ok = kp_count >= max(self.splashThreshold, mu + 3.0 * sd)
         else:
-            if self.debug:
-                print("[Splash Scan] No keypoints found in frame.")
+            spike_ok = kp_count >= self.splashThreshold
 
-        # Return the detection point or None
-        return detection_point if detected else None
-   
+        if not kps or not spike_ok:
+            self._need_confirm = False
+            return None
+
+        # 4) Cluster keypoints — we want one dense splash, not scattered texture
+        pts = np.float32([kp.pt for kp in kps])  # (x,y) in ROI coords
+        if len(pts) < 8:
+            self._need_confirm = False
+            return None
+
+        # eps ~20px works well @1080p; tune if needed
+        db = DBSCAN(eps=20, min_samples=8).fit(pts)
+        labels = db.labels_
+        unique, counts = np.unique(labels[labels >= 0], return_counts=True)
+        if unique.size == 0:
+            self._need_confirm = False
+            return None
+
+        # choose largest cluster
+        best_label = unique[np.argmax(counts)]
+        cluster = pts[labels == best_label]
+        cluster_ratio = len(cluster) / max(len(pts), 1)
+
+        # Tightness gate: cluster must be compact
+        cx_local, cy_local = np.median(cluster[:, 0]), np.median(cluster[:, 1])
+        rad = np.median(np.linalg.norm(cluster - np.array([cx_local, cy_local]), axis=1))
+        if cluster_ratio < 0.55 or rad > 45:  # require dense & not too spread out
+            self._need_confirm = False
+            return None
+
+        # 5) Foam/brightness cue near centroid (splash is bright & low saturation)
+        cx_i, cy_i = int(round(cx_local)), int(round(cy_local))
+        r = 16
+        x1 = max(0, cx_i - r); x2 = min(w, cx_i + r)
+        y1 = max(0, cy_i - r); y2 = min(h, cy_i + r)
+        patch = frame[y1:y2, x1:x2]
+        if patch.size == 0:
+            self._need_confirm = False
+            return None
+        hsv = cv.cvtColor(patch, cv.COLOR_BGR2HSV)
+        # "white-ish" foam: high V, low-to-mid S
+        v_mean = float(hsv[:, :, 2].mean())
+        s_mean = float(hsv[:, :, 1].mean())
+        foam_ok = (v_mean >= 180) and (s_mean <= 100)
+
+        # Gradient cue (optional): splashes have edges
+        sob = cv.Sobel(cv.cvtColor(patch, cv.COLOR_BGR2GRAY), cv.CV_32F, 1, 1, ksize=3)
+        grad_ok = float(np.mean(np.abs(sob))) >= 25
+
+        if not (foam_ok or grad_ok):
+            self._need_confirm = False
+            return None
+
+        # 6) Two-frame confirmation + cooldown (reduces one-off sparkles)
+        now = time.monotonic()
+        if now - self._last_detect_t < self._cooldown_sec:
+            return None
+
+        if not self._need_confirm:
+            self._need_confirm = True
+            self._pending_pt = (cx_local, cy_local)
+            return None
+
+        self._need_confirm = False
+        self._last_detect_t = now
+
+        # 7) Convert to screen coords
+        sx, sy = x + cx_local, y + cy_local
+
+        # 8) Smooth the point (helps angle stability)
+        if self.splash_point_smooth is None:
+            self.splash_point_smooth = (float(sx), float(sy))
+        else:
+            px, py = self.splash_point_smooth
+            px = (1 - self.splash_point_beta) * px + self.splash_point_beta * sx
+            py = (1 - self.splash_point_beta) * py + self.splash_point_beta * sy
+            self.splash_point_smooth = (px, py)
+        sx_s, sy_s = self.splash_point_smooth
+
+        # 9) Use penguin center as origin (global coords)
+        if hasattr(self, "penguin_center_screen") and self.penguin_center_screen is not None:
+            ox, oy = self.penguin_center_screen
+        else:
+            ox, oy = self.screen_center
+
+        dx = sx_s - ox
+        dy = sy_s - oy
+
+        if dx * dx + dy * dy < 40 * 40:
+            return None
+
+        # Compute raw world angle (same convention as penguin)
+        raw_angle = (math.degrees(math.atan2(-dy, dx)) + 360) % 360
+
+        # Smooth it
+        ang = self._circular_ema(self.splash_angle_smooth, raw_angle, self.splash_alpha)
+        self.splash_angle_smooth = ang
+        self.last_splash_point = (int(round(sx_s)), int(round(sy_s)))
+
+        if self.debug:
+            print(f'Final angle: {self.splash_angle_smooth:.1f}° at point ({sx_s:.1f}, {sy_s:.1f})')
+            
+        return (self.last_splash_point, self.splash_angle_smooth)
+
     def update_player_detector(self):
         """Run player angle detection on the current screen."""
         frame = screenshot_roi(roi=self.penguinROI)
@@ -238,35 +362,36 @@ class VisionCortex():
         self.facing_forward = white_ratio > self.whitePercentageThreshold
 
         # --- 4. Compute rod angle relative to penguin center ---
-        dx = rod_tip[0] - self.penguin_center[0]
-        dy = rod_tip[1] - self.penguin_center[1]
+        dx = self.rod_tip[0] - self.penguin_center[0]
+        dy = self.rod_tip[1] - self.penguin_center[1]
+
+        # raw geometric angle: +x = right (0°), +y = down (so negate dy)
         raw_angle = (math.degrees(math.atan2(-dy, dx)) + 360) % 360
 
-        # Mirror horizontally if penguin is facing away
+        # --- 5. Mirror if penguin is facing backward (to unify world orientation) ---
+        # When facing backward, flip 180° to represent rod direction in world space
         if not self.facing_forward:
-            raw_angle = (540 - raw_angle) % 360  # mirror across vertical axis
+            raw_angle = (raw_angle + 180) % 360
 
-        # --- 5. Apply smoothing to avoid jitter ---
+        # --- 6. Apply exponential smoothing (to prevent jitter) ---
         if self.smoothed_angle is None:
             self.smoothed_angle = raw_angle
         else:
-            delta = ((raw_angle - self.smoothed_angle + 540) % 360) - 180
-            self.smoothed_angle = (self.smoothed_angle + self.penguin_alpha * delta) % 360
+            diff = ((raw_angle - self.smoothed_angle + 540) % 360) - 180
+            self.smoothed_angle = (self.smoothed_angle + self.penguin_alpha * diff) % 360
 
-        # --- 6. Set the angle to a flat 90 if there are even amounts of orange pixels on left and right sides of ROI ---
-        mask_orange = cv.inRange(hsv, self.lower_orange, self.upper_orange)
-        orange_count = cv.countNonZero(mask_orange)
-        if orange_count > 0:
-            h, w = mask_orange.shape
-            left_half = mask_orange[:, : w // 2]
-            right_half = mask_orange[:, w // 2 :]
-            left_count = cv.countNonZero(left_half)
-            right_count = cv.countNonZero(right_half)
-            if abs(left_count - right_count) / orange_count < 0.1:  # within 10%
-                self.smoothed_angle = 90.0
+        # --- 7. Store the penguin center in screen coordinates for global use ---
+        self.penguin_center_screen = (
+            self.penguinROI[0] + self.penguin_center[0],
+            self.penguinROI[1] + self.penguin_center[1],
+        )
 
-        if self.debug: print(f"Angle: {self.smoothed_angle:.1f}°, facing {'forward' if self.facing_forward else 'backward'}.")
+        if self.debug:
+            facing = 'forward' if self.facing_forward else 'backward'
+            print(f"[Penguin] {self.smoothed_angle:.1f}° ({facing})")
+
         return self.smoothed_angle, self.facing_forward
+
 
 def locate_fullscreen(image_path, threshold=0.8):
     """
