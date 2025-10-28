@@ -13,166 +13,130 @@ def enterWindow():
     # drag the mouse down a little bit from the center point so the penguin is looking dead on
     # pyautogui.move(0, 50, duration=0.2)
 
-def rotate_away(ad):
-    '''Rotates the penguin away from the camera.
+def rotate_away(
+    visual,
+    target_angle=90,
+    tolerance=7,
+    sample_delay=0.02,
+    base_step_time=0.06,
+    min_step_time=0.02,
+    slowdown_radius=15,
+    debug=False
+):
+    """
+    Rotates the penguin until it's facing forward (angle ≈ 90°, direction=False),
+    using adaptive slowdown near the target to prevent overshoot.
 
     Args:
-        ad (tuple): A tuple containing:
-            angle (float): The current angle of the penguin.
-            direction (bool): The current direction the penguin is facing (True if towards the camera, False if away).
-    Returns:
-        direction (bool): The new direction the penguin is facing after rotation.
-    '''
-    angle, direction = ad
-    match direction or abs(angle-90) > 2:
-        case True:  # facing toward the camera
-            pyautogui.keyDown('right')
-        case False:  # facing away from the camera
+        visual (VisionCortex): Vision system providing update_player_detector().
+        target_angle (float): Target angle for facing forward (default=90°).
+        tolerance (float): Acceptable deviation (±degrees).
+        sample_delay (float): Delay between detector samples.
+        base_step_time (float): Maximum keypress duration (fast rotation).
+        min_step_time (float): Minimum keypress duration (fine adjustment).
+        slowdown_radius (float): Begin slowdown when within this many degrees of target.
+    """
+    print("[rotate_away] Rotating penguin until it faces forward...")
+
+    while True:
+        result = visual.update_player_detector()
+        if result is None:
+            print("[rotate_away] Lost tracking; pausing...")
+            pyautogui.keyUp('left')
             pyautogui.keyUp('right')
-    time.sleep(0.002)
+            time.sleep(0.2)
+            continue
 
-    return angle, direction # return the current direction
+        angle, facing_forward = result
+        angle = angle % 360
 
-def rotate_toward_splash(target_angle, visual, tolerance=5, max_time=3.0):
+        # --- Stop when facing forward (≈90°, not camera-facing) ---
+        if abs(angle - target_angle) <= tolerance and not facing_forward:
+            pyautogui.keyUp('left')
+            pyautogui.keyUp('right')
+            print(f"[rotate_away] Penguin aligned forward at {angle:.2f}° ✅")
+            break
+
+        # --- Compute angular difference ---
+        diff = ((target_angle - angle + 540) % 360) - 180
+        abs_diff = abs(diff)
+        if debug:
+            print(f"[rotate_away] angle={angle:.2f}°, diff={diff:.2f}°, facing_forward={facing_forward}")
+
+        # --- Adaptive slowdown ---
+        if abs_diff < slowdown_radius:
+            # Map proximity to step duration (closer = slower)
+            # Linear scale: diff=slowdown_radius → base_step_time, diff=0 → min_step_time
+            scale = abs_diff / slowdown_radius
+            step_time = min_step_time + (base_step_time - min_step_time) * scale
+        else:
+            step_time = base_step_time
+
+        # --- Turn shortest direction ---
+        if diff > 0:
+            pyautogui.keyDown('right')
+            time.sleep(step_time)
+            pyautogui.keyUp('right')
+        else:
+            pyautogui.keyDown('left')
+            time.sleep(step_time)
+            pyautogui.keyUp('left')
+
+        time.sleep(sample_delay)
+
+    return angle, facing_forward
+
+def rotate_camera_toward_splash(sx, sy, visual, 
+                                x_tolerance=40, 
+                                y_tolerance=80, 
+                                sensitivity=0.004, 
+                                max_time=3.0, 
+                                vertical=False):
     """
-    Rotate penguin toward a given world-space target angle (0–360°).
+    Rotate the camera until the splash point (sx, sy) is centered on screen.
 
     Args:
-        target_angle (float): Desired splash/fish world angle in degrees (0–360°).
-        visual (VisionCortex): Vision instance providing player orientation.
-        tolerance (float): Stop when within this many degrees.
-        max_time (float): Maximum rotation duration (seconds).
+        sx, sy (float): Splash point in absolute screen coordinates.
+        visual (VisionCortex): Vision instance (for screen center, size, etc.).
+        x_tolerance (int): Pixel distance in x to stop (horizontal centering).
+        y_tolerance (int): Pixel distance in y to stop (vertical centering).
+        sensitivity (float): Mouse movement per pixel offset (tune for camera rotation speed).
+        max_time (float): Max time allowed to adjust (seconds).
+        vertical (bool): Whether to adjust vertically as well.
     """
 
-    def unfold_angle(folded, facing_cam):
-        """Convert folded + direction flag → world-space angle."""
-        return (folded + (180.0 if facing_cam else 0.0)) % 360.0
-
-    def wrap180(a):
-        """Wrap angle diff into (-180, 180]."""
-        return (a + 180) % 360 - 180
-
-    print(f"Target world angle → {target_angle:.1f}°")
-
+    cx, cy = visual.screen_center
     start_time = time.time()
 
-    # ---------- rotation loop ----------
     while time.time() - start_time < max_time:
-        folded_angle, facing_cam = visual.update_player_detector()
-        world_angle = unfold_angle(folded_angle, facing_cam)
-        diff = wrap180(target_angle - world_angle)
+        # calculate offset from screen center
+        dx = sx - cx
+        dy = sy - cy
 
-        if abs(diff) <= tolerance:
-            break  # close enough
+        # stop if centered enough
+        if abs(dx) <= x_tolerance and (not vertical or abs(dy) <= y_tolerance):
+            print(f"Splash centered (dx={dx:.1f}, dy={dy:.1f})")
+            break
 
-        if diff > 0:
-            # Counter-clockwise (turn LEFT)
-            pyautogui.keyDown("left")
-            pyautogui.keyUp("right")
-        else:
-            # Clockwise (turn RIGHT)
-            pyautogui.keyDown("right")
-            pyautogui.keyUp("left")
+        # proportional horizontal movement
+        move_x = -dx * sensitivity
+        move_y = 0
 
-        # Adaptive delay based on how far off we are
-        delay = max(0.005, min(0.03, abs(diff) / 180 * 0.03))
-        time.sleep(delay)
+        # optional vertical centering
+        if vertical:
+            move_y = dy * sensitivity * 0.7
 
-        pyautogui.keyUp("left")
-        pyautogui.keyUp("right")
+        pyautogui.moveRel(move_x, move_y, duration=0.01)
 
-    # ---------- stop + final reading ----------
-    pyautogui.keyUp("left")
-    pyautogui.keyUp("right")
+        # progressively slow down near center
+        sensitivity *= 0.95 if abs(dx) < 200 else 1.0
 
-    folded_angle, facing_cam = visual.update_player_detector()
-    world_angle = unfold_angle(folded_angle, facing_cam)
-    diff = wrap180(target_angle - world_angle)
+        # small pause to allow frame to update
+        time.sleep(0.015)
 
-    print(
-        f"{'CAM' if facing_cam else 'FWD'}  folded={folded_angle:6.1f}  "
-        f"world={world_angle:6.1f}  target={target_angle:6.1f}  diff={diff:6.1f}"
-    )
-
-
-
-# def rotate_toward_splash(point, visual, tolerance=5, max_time=3.0):
-#     """
-#     Rotate the penguin toward a splash point using folded angle input.
-
-#     Parameters
-#     ----------
-#     point : tuple
-#         (x, y) coordinates of the splash in screen space.
-#     visual : VisionCortex-like object
-#         Must implement update_player_detector() -> (angle, direction)
-#         where:
-#             angle     = folded 0-179° heading
-#             direction = False if facing forward/away, True if facing camera/toward
-#     tolerance : float
-#         Stop once the angular difference is within this many degrees.
-#     max_time : float
-#         Maximum seconds to spend rotating before giving up.
-#     """
-#     # ---------- helpers ----------
-#     def unfold_angle(folded, facing_cam):
-#         """Convert folded [0-179] + direction flag → world-space [0-360)."""
-#         if not facing_cam:
-#             return folded % 360          # forward hemisphere
-#         else:
-#             return (360 - folded) % 360  # camera hemisphere (mirrored)
-
-#     def wrap180(diff):
-#         """Wrap an angle difference into (-180, 180]."""
-#         return (diff + 180) % 360 - 180
-
-#     # ---------- splash target ----------
-#     screen_width, screen_height = vision.get_screen_size()
-#     sx, sy = point
-#     dx = sx - screen_width / 2
-#     dy = screen_height / 2 - sy                # invert Y for math coords
-#     splash_world = math.degrees(math.atan2(dy, dx)) % 360
-#     print(f"Splash at ({sx}, {sy}) → world angle {splash_world:.1f}°")
-
-#     start_time = time.time()
-
-#     # ---------- rotation loop ----------
-#     while time.time() - start_time < max_time:
-#         folded_angle, facing_camera = visual.update_player_detector()
-#         world_angle = unfold_angle(folded_angle, facing_camera)
-
-#         diff = wrap180(splash_world - world_angle)
-
-#         if abs(diff) <= tolerance:
-#             break  # close enough
-
-#         # choose direction (same sense as simulation)
-#         if diff > 0:
-#             # Counter-clockwise → press LEFT
-#             pyautogui.keyDown("left")
-#             pyautogui.keyUp("right")
-#         else:
-#             # Clockwise → press RIGHT
-#             pyautogui.keyDown("right")
-#             pyautogui.keyUp("left")
-
-#         # time.sleep(0.02)  # short tap
-#         # pyautogui.keyUp("left")
-#         # pyautogui.keyUp("right")
-
-#     # safety release
-#     pyautogui.keyUp("left")
-#     pyautogui.keyUp("right")
-
-#     # final reading for logging
-#     folded_angle, facing_camera = visual.update_player_detector()
-#     world_angle = unfold_angle(folded_angle, facing_camera)
-#     diff = wrap180(splash_world - world_angle)
-
-#     print(
-#         f"Final folded={folded_angle:.1f}°, facing={'CAMERA' if facing_camera else 'FORWARD'}, "
-#         f"world={world_angle:.1f}°, diff={diff:.1f}°"
-#     )
+    # stop movement
+    pyautogui.moveRel(0, 0)
+    print("Camera alignment complete.")
 
 def searching(visual,debug=False):
     '''Rotates the camera (mouse movement) to search for splashes.
@@ -180,12 +144,13 @@ def searching(visual,debug=False):
         visual (vision.VisionCortex): The vision class instance for updating player detector.
     '''
     # Get angle and direction
+    visual.update_player_detector()
+    # Look for splashes
     point = visual.update_splash_detector()
     if point:
         if debug: print(f"Splash found at {point}")
         return point  # splash found, exit searching
     else:
-        visual.update_player_detector()
         movelength = 100
         rotationspeed = 0.3
         pyautogui.moveRel(movelength, 0, duration=rotationspeed)   # move mouse right

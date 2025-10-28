@@ -591,60 +591,82 @@ class FishingHUDOverlay(QtWidgets.QWidget):
                             QtCore.Qt.Tool)
         self.setAttribute(QtCore.Qt.WA_TranslucentBackground)
         self.setWindowFlag(QtCore.Qt.WindowTransparentForInput, True)
-
         self.setGeometry(0, 0, *self.vision.screen_size)
+
+        # State
         self.fish_log = []
         self.log_size = 6
         self.last_fish = None
         self.splash_angle = None
         self.last_angle = 0
         self.direction_label = "?"
+        self.motion_lines = []  # store motion contour lines
 
         # Timer
         self.timer = QtCore.QTimer()
         self.timer.timeout.connect(self.update_overlay)
         self.timer.start(int(1000 / fps))
 
-        # Exit
+        # Exit keys
         QtWidgets.QShortcut(QtGui.QKeySequence("Q"), self, activated=self.close)
         QtWidgets.QShortcut(QtGui.QKeySequence("Esc"), self, activated=self.close)
 
     def update_overlay(self):
+        # Run detectors
         splash_data = self.vision.update_splash_detector()   # (pt, angle) or None
         player_data = self.vision.update_player_detector()   # (angle, facing) or None
 
+        # --- Track splash detections ---
         if splash_data:
             (pt, s_ang) = splash_data
             self.last_fish = pt
             msg = f"[{QtCore.QTime.currentTime().toString()}] Splash @ {pt}  ∠ {s_ang:.1f}°"
             self.fish_log.append(msg)
             self.splash_angle = s_ang
-        else:
-            # optional while tuning:
-            # self.fish_log.append(f"[{QtCore.QTime.currentTime().toString()}] No splash.")
-            pass
+        if len(self.fish_log) > self.log_size:
+            self.fish_log = self.fish_log[-self.log_size:]
 
+        # --- Track player info ---
         if player_data:
             angle, facing = player_data
             self.last_angle = angle
             self.direction_label = "Forward" if facing else "Away"
 
-        if len(self.fish_log) > self.log_size:
-            self.fish_log = self.fish_log[-self.log_size:]
+        # --- Store current motion lines for overlay ---
+        if hasattr(self.vision, "motion_contours") and self.vision.motion_contours:
+            self.motion_lines = []
+            for c in self.vision.motion_contours:
+                pts = c.reshape(-1, 2)
+                pts[:, 0] += self.vision.splashROI[0]
+                pts[:, 1] += self.vision.splashROI[1]
+                self.motion_lines.append(pts)
+        else:
+            self.motion_lines = []
 
         self.update()
-
 
     def paintEvent(self, event):
         painter = QtGui.QPainter(self)
         painter.setRenderHint(QtGui.QPainter.Antialiasing)
 
-        # Splash ROI
+        # --- 1. Draw Splash ROI ---
         x, y, w, h = self.vision.splashROI
-        painter.setPen(QtGui.QPen(QtGui.QColor(0, 128, 255, 200), 2))
+        painter.setPen(QtGui.QPen(QtGui.QColor(0, 128, 255, 180), 2))
         painter.drawRect(x, y, w, h)
 
-        # Fish detection marker
+        # --- 2. Draw motion contours ---
+        if self.motion_lines:
+            painter.setPen(QtGui.QPen(QtGui.QColor(255, 255, 0, 180), 2))
+            for pts in self.motion_lines:
+                for i in range(len(pts) - 1):
+                    p1 = QtCore.QPoint(*pts[i])
+                    p2 = QtCore.QPoint(*pts[i + 1])
+                    painter.drawLine(p1, p2)
+                # close contour loop
+                if len(pts) > 2:
+                    painter.drawLine(QtCore.QPoint(*pts[-1]), QtCore.QPoint(*pts[0]))
+
+        # --- 3. Fish marker ---
         if self.last_fish:
             fx, fy = self.last_fish
             painter.setBrush(QtGui.QColor(255, 0, 0, 220))
@@ -654,13 +676,12 @@ class FishingHUDOverlay(QtWidgets.QWidget):
                 painter.setPen(QtGui.QColor(255, 255, 255, 230))
                 painter.drawText(fx + 14, fy, f"{self.splash_angle:.1f}°")
 
-
-        # Player angle
+        # --- 4. Player info ---
         painter.setFont(QtGui.QFont("Consolas", 16))
         painter.setPen(QtGui.QColor(255, 255, 255, 230))
         painter.drawText(20, 40, f"Rod: {self.last_angle:.1f}° ({self.direction_label})")
 
-        # Rod line (if both points known)
+        # --- 5. Rod visualization ---
         if self.vision.penguin_center and self.vision.rod_tip:
             px, py = self.vision.penguin_center
             rx, ry = self.vision.rod_tip
@@ -676,7 +697,7 @@ class FishingHUDOverlay(QtWidgets.QWidget):
             painter.setBrush(QtGui.QColor(255, 255, 0))
             painter.drawEllipse(rx - 4, ry - 4, 8, 8)
 
-        # Log
+        # --- 6. Log ---
         screen = QtWidgets.QApplication.primaryScreen().geometry()
         painter.setFont(QtGui.QFont("Consolas", 12))
         y_offset = screen.height() - 20

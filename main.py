@@ -58,6 +58,9 @@
 -- Now it's too picky, needs a lot of work.
 - Further refined angle detector for player character.
 - Added angle calibration script to slowly rotate the avatar and log folded angles over time.
+20251028:
+- Replaced rotate_toward_splash with rotate_camera_toward_splash, as the cast gradually moves toward where the camera is pointed.
+- Changed splash detector to use a reverse blue mask, as the previous method was missing splashes when searching.
 '''
 '''To Do:
 
@@ -174,18 +177,17 @@ def main():
     while time.time() - start_time < 120:  # run for 120 seconds
 
         # Locate splashes using ORB
-        eyes.update_player_detector() # update player angle first
         point = control.searching(eyes, debug=True)
 
         # If a splash is found, rotate toward it
         if point:
             (splash_x, splash_y), splash_angle = point
-            control.rotate_toward_splash(splash_angle, eyes)
-            
+            control.rotate_camera_toward_splash(splash_x, splash_y, eyes)
+            control.rotate_away(eyes, debug=True)  # ensure facing away from camera before casting
             control.cast_rod((splash_x, splash_y))
             time.sleep(8) # Wait to reel in fish before searching again
         
-        time.sleep(0.4) # Wait before next search
+        time.sleep(0.6) # Wait before next search
 
 if __name__ == "__main__":
     main()

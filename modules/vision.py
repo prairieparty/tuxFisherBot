@@ -112,18 +112,19 @@ class VisionCortex():
             fastThreshold=10
         )
 
-        self.splashThreshold = 60          # base minimum count (you can tune)
-        self.splash_alpha = 0.35           # angle EMA
-        self.splash_point_beta = 0.4       # point EMA
+        # splash detector parameters
+        self.splashThreshold = 25           # lowered from 60 → more sensitive
+        self.splash_alpha = 0.45            # faster angular response
+        self.splash_point_beta = 0.55       # faster position tracking
         self.splash_angle_smooth = None
         self.splash_point_smooth = None
 
-        # Anti-FP state
-        self._kp_hist = deque(maxlen=30)   # rolling history of kp counts
+        self._kp_hist = deque(maxlen=20)
         self._last_detect_t = 0.0
-        self._cooldown_sec = 0.35          # refractory period after a detection
-        self._need_confirm = False         # 2-frame confirmation
+        self._cooldown_sec = 0.15          # shorter cooldown (was 0.3)
+        self._need_confirm = False
         self._pending_pt = None
+        self.motion_detection_frames = [] # will hold current frame and one prior for motion detection
 
         # initialize player angle detector
         pengX = int(self.screen_center[0] - (self.screen_size[0]//6.4) // 2)
@@ -172,110 +173,81 @@ class VisionCortex():
 
     def update_splash_detector(self):
         """
-        Robust splash detection.
-        Returns (screen_point, smoothed_angle_deg) or None.
+        Detect splash using motion (frame differencing), while excluding
+        sky and player zones. Returns (screen_point, smoothed_angle_deg) or None.
         """
         x, y, w, h = self.splashROI
 
-        # 1) Capture ROI ONLY (prevents overlay/sky noise)
+        # Capture ROI only
         with mss() as sct:
             roi_img = np.array(sct.grab({"top": y, "left": x, "width": w, "height": h}))
         frame = cv.cvtColor(roi_img, cv.COLOR_BGRA2BGR)
-        gray  = cv.cvtColor(frame, cv.COLOR_BGR2GRAY)
+        gray = cv.cvtColor(frame, cv.COLOR_BGR2GRAY)
+        gray = cv.GaussianBlur(gray, (5, 5), 0)
 
-        # 2) ORB keypoints inside ROI
-        kps, des = self.splashOrb.detectAndCompute(gray, None)
-        kp_count = 0 if not kps else len(kps)
-        self._kp_hist.append(kp_count)
-
-        # 3) Rolling baseline spike test (mean + 3σ) to reject “always busy” water
-        if len(self._kp_hist) >= 10:
-            mu = np.mean(self._kp_hist)
-            sd = np.std(self._kp_hist) + 1e-6
-            spike_ok = kp_count >= max(self.splashThreshold, mu + 3.0 * sd)
-        else:
-            spike_ok = kp_count >= self.splashThreshold
-
-        if not kps or not spike_ok:
-            self._need_confirm = False
+        # Initialize history
+        if not hasattr(self, "_prev_splash_gray"):
+            self._prev_splash_gray = gray
             return None
 
-        # 4) Cluster keypoints — we want one dense splash, not scattered texture
-        pts = np.float32([kp.pt for kp in kps])  # (x,y) in ROI coords
-        if len(pts) < 8:
-            self._need_confirm = False
+        # --- 1. Motion difference ---
+        diff = cv.absdiff(gray, self._prev_splash_gray)
+        _, motion_mask = cv.threshold(diff, 25, 255, cv.THRESH_BINARY)
+
+        # --- 2. Exclusion masks ---
+
+        # 2a. Exclude everything above splash ROI (already handled by ROI crop)
+        # 2b. Exclude slightly expanded player zone
+        px, py, pw, ph = self.penguinROI
+        expand = 40  # expand the player exclusion box
+        ex_left   = max(0, px - expand - x)
+        ex_top    = max(0, py - expand - y)
+        ex_right  = min(w, px + pw + expand - x)
+        ex_bottom = min(h, py + ph + expand - y)
+        cv.rectangle(motion_mask, (ex_left, ex_top), (ex_right, ex_bottom), 0, -1)
+
+        # --- 3. Morphological cleanup ---
+        kernel = np.ones((5, 5), np.uint8)
+        motion_mask = cv.morphologyEx(motion_mask, cv.MORPH_OPEN, kernel)
+        motion_mask = cv.morphologyEx(motion_mask, cv.MORPH_CLOSE, kernel)
+
+        # --- 4. Find motion blobs ---
+        contours, _ = cv.findContours(motion_mask, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE)
+        self.motion_contours = contours  # for debugging/visualization
+        if not contours:
+            self._prev_splash_gray = gray
+            self.motion_contours = []
             return None
 
-        # eps ~20px works well @1080p; tune if needed
-        db = DBSCAN(eps=20, min_samples=8).fit(pts)
-        labels = db.labels_
-        unique, counts = np.unique(labels[labels >= 0], return_counts=True)
-        if unique.size == 0:
-            self._need_confirm = False
+        # Choose largest motion blob
+        best_c = max(contours, key=cv.contourArea)
+        area = cv.contourArea(best_c)
+        if area < 80 or area > 20000:
+            self._prev_splash_gray = gray
             return None
 
-        # choose largest cluster
-        best_label = unique[np.argmax(counts)]
-        cluster = pts[labels == best_label]
-        cluster_ratio = len(cluster) / max(len(pts), 1)
-
-        # Tightness gate: cluster must be compact
-        cx_local, cy_local = np.median(cluster[:, 0]), np.median(cluster[:, 1])
-        rad = np.median(np.linalg.norm(cluster - np.array([cx_local, cy_local]), axis=1))
-        if cluster_ratio < 0.55 or rad > 45:  # require dense & not too spread out
-            self._need_confirm = False
+        # --- 5. Compute centroid ---
+        M = cv.moments(best_c)
+        if M["m00"] == 0:
+            self._prev_splash_gray = gray
             return None
+        cx_local = int(M["m10"] / M["m00"])
+        cy_local = int(M["m01"] / M["m00"])
 
-        # 5) Foam/brightness cue near centroid (splash is bright & low saturation)
-        cx_i, cy_i = int(round(cx_local)), int(round(cy_local))
-        r = 16
-        x1 = max(0, cx_i - r); x2 = min(w, cx_i + r)
-        y1 = max(0, cy_i - r); y2 = min(h, cy_i + r)
-        patch = frame[y1:y2, x1:x2]
-        if patch.size == 0:
-            self._need_confirm = False
-            return None
-        hsv = cv.cvtColor(patch, cv.COLOR_BGR2HSV)
-        # "white-ish" foam: high V, low-to-mid S
-        v_mean = float(hsv[:, :, 2].mean())
-        s_mean = float(hsv[:, :, 1].mean())
-        foam_ok = (v_mean >= 180) and (s_mean <= 100)
-
-        # Gradient cue (optional): splashes have edges
-        sob = cv.Sobel(cv.cvtColor(patch, cv.COLOR_BGR2GRAY), cv.CV_32F, 1, 1, ksize=3)
-        grad_ok = float(np.mean(np.abs(sob))) >= 25
-
-        if not (foam_ok or grad_ok):
-            self._need_confirm = False
-            return None
-
-        # 6) Two-frame confirmation + cooldown (reduces one-off sparkles)
-        now = time.monotonic()
-        if now - self._last_detect_t < self._cooldown_sec:
-            return None
-
-        if not self._need_confirm:
-            self._need_confirm = True
-            self._pending_pt = (cx_local, cy_local)
-            return None
-
-        self._need_confirm = False
-        self._last_detect_t = now
-
-        # 7) Convert to screen coords
+        # --- 6. Convert to screen coords ---
         sx, sy = x + cx_local, y + cy_local
 
-        # 8) Smooth the point (helps angle stability)
+        # --- 7. Smooth splash point ---
         if self.splash_point_smooth is None:
             self.splash_point_smooth = (float(sx), float(sy))
         else:
-            px, py = self.splash_point_smooth
-            px = (1 - self.splash_point_beta) * px + self.splash_point_beta * sx
-            py = (1 - self.splash_point_beta) * py + self.splash_point_beta * sy
-            self.splash_point_smooth = (px, py)
+            px_s, py_s = self.splash_point_smooth
+            px_s = (1 - self.splash_point_beta) * px_s + self.splash_point_beta * sx
+            py_s = (1 - self.splash_point_beta) * py_s + self.splash_point_beta * sy
+            self.splash_point_smooth = (px_s, py_s)
         sx_s, sy_s = self.splash_point_smooth
 
-        # 9) Use penguin center as origin (global coords)
+        # --- 8. Compute world angle relative to player ---
         if hasattr(self, "penguin_center_screen") and self.penguin_center_screen is not None:
             ox, oy = self.penguin_center_screen
         else:
@@ -283,22 +255,162 @@ class VisionCortex():
 
         dx = sx_s - ox
         dy = sy_s - oy
-
-        if dx * dx + dy * dy < 40 * 40:
+        if dx * dx + dy * dy < 25 * 25:
+            self._prev_splash_gray = gray
             return None
 
-        # Compute raw world angle (same convention as penguin)
         raw_angle = (math.degrees(math.atan2(-dy, dx)) + 360) % 360
-
-        # Smooth it
         ang = self._circular_ema(self.splash_angle_smooth, raw_angle, self.splash_alpha)
         self.splash_angle_smooth = ang
         self.last_splash_point = (int(round(sx_s)), int(round(sy_s)))
 
+        # Update previous frame
+        self._prev_splash_gray = gray
+
         if self.debug:
-            print(f'Final angle: {self.splash_angle_smooth:.1f}° at point ({sx_s:.1f}, {sy_s:.1f})')
-            
+            print(f"[MotionSplash] at ({sx_s:.1f},{sy_s:.1f}) → {self.splash_angle_smooth:.1f}° area={area:.0f}")
+
         return (self.last_splash_point, self.splash_angle_smooth)
+
+    def motion_detection(self, bbox_thresh=400, nms_thresh=1e-3, frames=None):
+        '''An alternate method for detecting splashes using motion detection.'''
+        ''' if frames is provided, use those frames instead of taking new screenshots '''
+        
+        # helper functions
+        def get_mask(frame1, frame2, kernel=np.array((9,9), dtype=np.uint8)):
+            """ Obtains image mask
+                Inputs: 
+                    frame1 - Grayscale frame at time t
+                    frame2 - Grayscale frame at time t + 1
+                    kernel - (NxN) array for Morphological Operations
+                Outputs: 
+                    mask - Thresholded mask for moving pixels
+                """
+
+            frame_diff = cv.subtract(frame2, frame1)
+
+            # blur the frame difference
+            frame_diff = cv.medianBlur(frame_diff, 3)
+            mask = cv.adaptiveThreshold(frame_diff, 255, cv.ADAPTIVE_THRESH_GAUSSIAN_C,\
+                    cv.THRESH_BINARY_INV, 11, 3)
+
+            mask = cv.medianBlur(mask, 3)
+
+            # morphological operations
+            mask = cv.morphologyEx(mask, cv.MORPH_CLOSE, kernel, iterations=1)
+
+            return mask
+
+        def get_contour_detections(mask, thresh=400):
+            """ Obtains initial proposed detections from contours discoverd on the mask. 
+                Scores are taken as the bbox area, larger is higher.
+                Inputs:
+                    mask - thresholded image mask
+                    thresh - threshold for contour size
+                Outputs:
+                    detectons - array of proposed detection bounding boxes and scores [[x1,y1,x2,y2,s]]
+                """
+            # get mask contours
+            contours, _ = cv.findContours(mask, 
+                                        cv.RETR_EXTERNAL, # cv.RETR_TREE, 
+                                        cv.CHAIN_APPROX_TC89_L1)
+            detections = []
+            for cnt in contours:
+                x,y,w,h = cv.boundingRect(cnt)
+                area = w*h
+                if area > thresh: 
+                    detections.append([x,y,x+w,y+h, area])
+
+            return np.array(detections)
+        
+        def remove_contained_bboxes(boxes):
+            """ Removes all smaller boxes that are contained within larger boxes.
+                Requires bboxes to be soirted by area (score)
+                Inputs:
+                    boxes - array bounding boxes sorted (descending) by area 
+                            [[x1,y1,x2,y2]]
+                Outputs:
+                    keep - indexes of bounding boxes that are not entirely contained 
+                        in another box
+                """
+            check_array = np.array([True, True, False, False])
+            keep = list(range(0, len(boxes)))
+            for i in keep: # range(0, len(bboxes)):
+                for j in range(0, len(boxes)):
+                    # check if box j is completely contained in box i
+                    if np.all((np.array(boxes[j]) >= np.array(boxes[i])) == check_array):
+                        try:
+                            keep.remove(j)
+                        except ValueError:
+                            continue
+            return keep
+
+        def non_max_suppression(boxes, scores, threshold=1e-1):
+            """
+            Perform non-max suppression on a set of bounding boxes and corresponding scores.
+            Inputs:
+                boxes: a list of bounding boxes in the format [xmin, ymin, xmax, ymax]
+                scores: a list of corresponding scores 
+                threshold: the IoU (intersection-over-union) threshold for merging bounding boxes
+            Outputs:
+                boxes - non-max suppressed boxes
+            """
+            # Sort the boxes by score in descending order
+            boxes = boxes[np.argsort(scores)[::-1]]
+
+            # remove all contained bounding boxes and get ordered index
+            order = remove_contained_bboxes(boxes)
+
+            keep = []
+            while order:
+                i = order.pop(0)
+                keep.append(i)
+                for j in order:
+                    # Calculate the IoU between the two boxes
+                    intersection = max(0, min(boxes[i][2], boxes[j][2]) - max(boxes[i][0], boxes[j][0])) * \
+                                max(0, min(boxes[i][3], boxes[j][3]) - max(boxes[i][1], boxes[j][1]))
+                    union = (boxes[i][2] - boxes[i][0]) * (boxes[i][3] - boxes[i][1]) + \
+                            (boxes[j][2] - boxes[j][0]) * (boxes[j][3] - boxes[j][1]) - intersection
+                    iou = intersection / union
+
+                    # Remove boxes with IoU greater than the threshold
+                    if iou > threshold:
+                        order.remove(j)
+                        
+            return boxes[keep]
+
+        # if frames is a list with two frames, use those
+        if frames is not None and len(frames) == 2:
+            img1, img2 = frames
+            img1 = cv.cvtColor(img1, cv.COLOR_BGR2GRAY)
+            img2 = cv.cvtColor(img2, cv.COLOR_BGR2GRAY)
+        else:
+            frame = screenshot_roi(roi=self.splashROI)
+            gray = cv.cvtColor(frame, cv.COLOR_BGR2GRAY)
+            self.motion_detection_frames.append(gray)
+            if len(self.motion_detection_frames) < 2: return None
+            if len(self.motion_detection_frames) > 2:
+                self.motion_detection_frames.pop(0)
+
+            # convert to grayscale
+            img1 = self.motion_detection_frames[0]
+            img2 = self.motion_detection_frames[1]
+
+        # compute motion mask
+        kernel = np.array((9,9), dtype=np.uint8)
+        mask = get_mask(img1, img2, kernel)
+
+        # get initially proposed detections from contours
+        detections = get_contour_detections(mask, bbox_thresh)
+
+        # separate bboxes and scores
+        bboxes = detections[:, :4]
+        scores = detections[:, -1]
+
+        # perform Non-Maximal Supression on initial detections
+        nmax = non_max_suppression(bboxes, scores, nms_thresh)
+
+        return nmax
 
     def update_player_detector(self):
         """Run player angle detection on the current screen."""
