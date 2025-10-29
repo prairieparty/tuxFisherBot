@@ -61,12 +61,13 @@
 20251028:
 - Replaced rotate_toward_splash with rotate_camera_toward_splash, as the cast gradually moves toward where the camera is pointed.
 - Changed splash detector to use a reverse blue mask, as the previous method was missing splashes when searching.
+20251029:
+- Replaced splash detector with motion detection using frame differencing and contour detection.
+-- Made a locally hosted test file to run the new method, works well statically.
 '''
 '''To Do:
-
-- refine splash detection to be less picky - currently misses all splashes when searching
--- works perfectly fine when static, but rotating the camera makes it miss everything
-- test whether splash angle and rod angle use the same reference frame
+- improve motion detection to work with moving camera
+- rework rotating the penguin toward splash - incredibly janky right now
 - optimize the codebase - there's probably a lot of redundant code and imports
 
 '''
@@ -181,7 +182,7 @@ def main():
 
         # If a splash is found, rotate toward it
         if point:
-            (splash_x, splash_y), splash_angle = point
+            (splash_x, splash_y) = point
             control.rotate_camera_toward_splash(splash_x, splash_y, eyes)
             control.rotate_away(eyes, debug=True)  # ensure facing away from camera before casting
             control.cast_rod((splash_x, splash_y))

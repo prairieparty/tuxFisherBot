@@ -6,7 +6,6 @@ from mss import mss
 import math
 from PyQt5 import QtCore
 import time
-from sklearn.cluster import DBSCAN
 from collections import deque
 
 # Module to handle vision-related tasks
@@ -98,7 +97,7 @@ class VisionCortex():
         # initialize splash detector
 
         self.splashROI = (0, 
-                          self.screen_size[1]//8, 
+                          self.screen_size[1]//6, 
                           self.screen_size[0], 
                           self.screen_size[1]//4)  # x, y, w, h
         
@@ -113,9 +112,9 @@ class VisionCortex():
         )
 
         # splash detector parameters
-        self.splashThreshold = 25           # lowered from 60 → more sensitive
-        self.splash_alpha = 0.45            # faster angular response
-        self.splash_point_beta = 0.55       # faster position tracking
+        self.splashThreshold = 400            # bounding box area threshold
+        self.splash_alpha = 0.45              # faster angular response
+        self.splash_point_beta = 0.55         # faster position tracking
         self.splash_angle_smooth = None
         self.splash_point_smooth = None
 
@@ -125,6 +124,12 @@ class VisionCortex():
         self._need_confirm = False
         self._pending_pt = None
         self.motion_detection_frames = [] # will hold current frame and one prior for motion detection
+
+        # --- Motion detection tuning (to suppress horizon waves) ---
+        self.motion_diff_thresh = 25          # binary threshold on frame diff (increase to ignore low motion)
+        self.horizon_mask_frac = 0.33         # top fraction of splash ROI to ignore (waves/horizon)
+        self.min_bbox_h = 16                  # reject very flat bands (min bbox height in px)
+        self.max_wave_aspect = 4.0            # reject very wide bands (w/h larger than this)
 
         # initialize player angle detector
         pengX = int(self.screen_center[0] - (self.screen_size[0]//6.4) // 2)
@@ -272,7 +277,7 @@ class VisionCortex():
 
         return (self.last_splash_point, self.splash_angle_smooth)
 
-    def motion_detection(self, bbox_thresh=400, nms_thresh=1e-3, frames=None):
+    def motion_detection(self, bbox_thresh=None, nms_thresh=1e-3, frames=None, db=False):
         '''An alternate method for detecting splashes using motion detection.'''
         ''' if frames is provided, use those frames instead of taking new screenshots '''
         
@@ -287,17 +292,20 @@ class VisionCortex():
                     mask - Thresholded mask for moving pixels
                 """
 
-            frame_diff = cv.subtract(frame2, frame1)
+            # frame difference
+            frame_diff = cv.absdiff(frame2, frame1)
 
-            # blur the frame difference
+            # slight denoise
             frame_diff = cv.medianBlur(frame_diff, 3)
-            mask = cv.adaptiveThreshold(frame_diff, 255, cv.ADAPTIVE_THRESH_GAUSSIAN_C,\
-                    cv.THRESH_BINARY_INV, 11, 3)
 
-            mask = cv.medianBlur(mask, 3)
+            # binary threshold (non-inverted) to suppress low-amplitude waves
+            _, mask = cv.threshold(frame_diff, self.motion_diff_thresh, 255, cv.THRESH_BINARY)
 
-            # morphological operations
-            mask = cv.morphologyEx(mask, cv.MORPH_CLOSE, kernel, iterations=1)
+            # morphology: prefer vertical features, break long horizontal bands
+            open_k = cv.getStructuringElement(cv.MORPH_RECT, (3, 7))   # taller kernel
+            close_k = cv.getStructuringElement(cv.MORPH_RECT, (3, 3))
+            mask = cv.morphologyEx(mask, cv.MORPH_OPEN, open_k)
+            mask = cv.morphologyEx(mask, cv.MORPH_CLOSE, close_k)
 
             return mask
 
@@ -318,10 +326,19 @@ class VisionCortex():
             for cnt in contours:
                 x,y,w,h = cv.boundingRect(cnt)
                 area = w*h
-                if area > thresh: 
-                    detections.append([x,y,x+w,y+h, area])
+                # reject very flat/wide bands near horizon
+                if area <= thresh: 
+                    continue
+                if h < self.min_bbox_h:
+                    continue
+                if w / max(h, 1) > self.max_wave_aspect:
+                    continue
+                detections.append([x,y,x+w,y+h, area])
 
-            return np.array(detections)
+            # Ensure a 2D array even when empty
+            if len(detections) == 0:
+                return np.empty((0, 5), dtype=np.int32)
+            return np.array(detections, dtype=np.int32)
         
         def remove_contained_bboxes(boxes):
             """ Removes all smaller boxes that are contained within larger boxes.
@@ -378,6 +395,24 @@ class VisionCortex():
                         order.remove(j)
                         
             return boxes[keep]
+        
+        def boxes_to_points(boxes):
+            """ Converts bounding boxes to center points.
+                Inputs:
+                    boxes - array of bounding boxes [[x1,y1,x2,y2]]
+                Outputs:
+                    points - array of center points [[x,y]]
+                """
+            points = []
+            for box in boxes:
+                x1, y1, x2, y2 = box
+                cx = (x1 + x2) // 2
+                cy = (y1 + y2) // 2
+                points.append([cx, cy])
+            return points
+        
+        if bbox_thresh is None:
+            bbox_thresh = self.splashThreshold
 
         # if frames is a list with two frames, use those
         if frames is not None and len(frames) == 2:
@@ -400,8 +435,18 @@ class VisionCortex():
         kernel = np.array((9,9), dtype=np.uint8)
         mask = get_mask(img1, img2, kernel)
 
+        # suppress top band within splash ROI (horizon region)
+        if mask is not None and mask.size > 0:
+            top_cut = int(mask.shape[0] * self.horizon_mask_frac)
+            if top_cut > 0:
+                mask[:top_cut, :] = 0
+
         # get initially proposed detections from contours
         detections = get_contour_detections(mask, bbox_thresh)
+
+        # Early out if no detections
+        if detections is None or detections.shape[0] == 0:
+            return np.empty((0, 4), dtype=np.int32)
 
         # separate bboxes and scores
         bboxes = detections[:, :4]
@@ -410,7 +455,10 @@ class VisionCortex():
         # perform Non-Maximal Supression on initial detections
         nmax = non_max_suppression(bboxes, scores, nms_thresh)
 
-        return nmax
+        if db: return nmax
+        # convert final bounding boxes to center points
+        points = boxes_to_points(nmax)
+        return points
 
     def update_player_detector(self):
         """Run player angle detection on the current screen."""

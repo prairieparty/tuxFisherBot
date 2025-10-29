@@ -146,10 +146,10 @@ def searching(visual,debug=False):
     # Get angle and direction
     visual.update_player_detector()
     # Look for splashes
-    point = visual.update_splash_detector()
-    if point:
-        if debug: print(f"Splash found at {point}")
-        return point  # splash found, exit searching
+    points = visual.motion_detection()
+    if points is not None and len(points) > 0:
+        if debug: [print(f"  Found splash at {i}") for i in points]
+        return points[0]  # splash found, exit searching
     else:
         movelength = 100
         rotationspeed = 0.3
