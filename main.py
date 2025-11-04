@@ -64,6 +64,8 @@
 20251029:
 - Replaced splash detector with motion detection using frame differencing and contour detection.
 -- Made a locally hosted test file to run the new method, works well statically.
+20251104:
+- Began reworking player angle detection yet again for more reliability.
 '''
 '''To Do:
 - improve motion detection to work with moving camera

@@ -47,11 +47,11 @@ def rotate_away(
             time.sleep(0.2)
             continue
 
-        angle, facing_forward = result
+        angle= result
         angle = angle % 360
 
         # --- Stop when facing forward (≈90°, not camera-facing) ---
-        if abs(angle - target_angle) <= tolerance and not facing_forward:
+        if abs(angle - target_angle) <= tolerance:
             pyautogui.keyUp('left')
             pyautogui.keyUp('right')
             print(f"[rotate_away] Penguin aligned forward at {angle:.2f}° ✅")
@@ -61,7 +61,7 @@ def rotate_away(
         diff = ((target_angle - angle + 540) % 360) - 180
         abs_diff = abs(diff)
         if debug:
-            print(f"[rotate_away] angle={angle:.2f}°, diff={diff:.2f}°, facing_forward={facing_forward}")
+            print(f"[rotate_away] angle={angle:.2f}°, diff={diff:.2f}°")
 
         # --- Adaptive slowdown ---
         if abs_diff < slowdown_radius:
@@ -84,7 +84,7 @@ def rotate_away(
 
         time.sleep(sample_delay)
 
-    return angle, facing_forward
+    return angle
 
 def rotate_camera_toward_splash(sx, sy, visual, 
                                 x_tolerance=40, 
