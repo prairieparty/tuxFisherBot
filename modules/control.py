@@ -146,6 +146,8 @@ def searching(visual,debug=False):
     # Get angle and direction
     visual.update_player_detector()
     # Look for splashes
+    visual.motion_detection() #call it without storing so it doesnt pick up camera movement as splash
+    time.sleep(0.2) # small delay to allow frame to update
     points = visual.motion_detection()
     if points is not None and len(points) > 0:
         if debug: [print(f"  Found splash at {i}") for i in points]
@@ -154,7 +156,6 @@ def searching(visual,debug=False):
         movelength = 100
         rotationspeed = 0.3
         pyautogui.moveRel(movelength, 0, duration=rotationspeed)   # move mouse right
-        time.sleep(0.3)
         visual.splashROI = (0, visual.screen_size[1]//8,
                   visual.screen_size[0], visual.screen_size[1]//4)
 
