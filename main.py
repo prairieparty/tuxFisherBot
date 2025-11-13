@@ -164,7 +164,7 @@ def main():
     # run for 120 seconds and locate splashes
     start_time = time.time()
     eyes = vision.VisionCortex() # initialize vision class with debug mode on
-    searcher = control.Searcher(eyes)
+    searcher = control.Searcher(eyes, maximal = 4)
     while time.time() - start_time < 120:  # run for 120 seconds
 
         # Locate splashes using ORB

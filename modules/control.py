@@ -24,7 +24,7 @@ def rotate_away(
     min_step_time=0.02,
     slowdown_radius=20,
     max_time=6.0,
-    debug=True
+    debug=False
 ):
     """
     Rotate until facing forward (angle≈target_angle). Uses raw angle, adaptive step time,
