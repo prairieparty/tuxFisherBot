@@ -66,6 +66,10 @@
 -- Made a locally hosted test file to run the new method, works well statically.
 20251104:
 - Began reworking player angle detection yet again for more reliability.
+20251113:
+- Finished reworking player angle detection; reworked code to rotate penguin toward splash based on new angle detection + different math.
+- reworked camera rotation code - still not amazing, but an improvement
+- reworked searching to reverse direction every eight turns or so; this helps with rotation during the casting.
 '''
 '''To Do:
 - improve motion detection to work with moving camera
@@ -149,48 +153,38 @@ def main():
 
     # load the vision module
     vision = loadModule("vision")
-    eyes = vision.VisionCortex() # initialize vision class with debug mode on
     # load the control module
     control = loadModule("control")
-    # load the debug module (not to be included in final build)
-    debug = loadModule("debug")
+    # # load the debug module (not to be included in final build)
+    # debug = loadModule("debug")
 
     # Launch Tux Fisher
     launch_tux_fisher(fullscreen=True)
     
     control.enterWindow() # Ensure the game window is active
 
-    direction = True # assume starting facing toward the camera
-    angle = 0.0
-
-    # while direction or abs(angle-90) > 2: # Rotate away from camera until facing away
-    #     ad = eyes.update_player_detector()
-    #     try:
-    #         angle, direction = control.rotate_away(ad)
-    #     except Exception as e:
-    #         print(f"Error rotating away: {e}")
-    # print(f"Finished rotating away: angle={angle:.1f}°, direction={'forward' if direction else 'backward'}.")
-    
-    # Debug overlay (not to be included in final build)
-    # overlay = debug.FishingHUDOverlay()
-    # overlay.run()
-
+    #debug
     # run for 120 seconds and locate splashes
     start_time = time.time()
+    eyes = vision.VisionCortex() # initialize vision class with debug mode on
+    searcher = control.Searcher(eyes)
     while time.time() - start_time < 120:  # run for 120 seconds
 
         # Locate splashes using ORB
-        point = control.searching(eyes, debug=True)
+        point = searcher.searching()
 
         # If a splash is found, rotate toward it
         if point:
             (splash_x, splash_y) = point
             control.rotate_camera_toward_splash(splash_x, splash_y, eyes)
-            control.rotate_away(eyes, debug=True)  # ensure facing away from camera before casting
+            control.rotate_away(eyes)  # ensure facing away from camera before casting
             control.cast_rod((splash_x, splash_y))
             time.sleep(8) # Wait to reel in fish before searching again
         
         time.sleep(0.6) # Wait before next search
+
+    # close the firefox tab
+    pyautogui.hotkey('ctrl', 'w')
 
 if __name__ == "__main__":
     main()

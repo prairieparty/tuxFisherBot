@@ -5,3 +5,5 @@ frame_differencing.gif
 motiondetectortest.py
 splash_roi.png
 __pycache__/main.cpython-312.pyc
+angles.csv
+debug.py

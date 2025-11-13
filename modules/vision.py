@@ -155,7 +155,33 @@ class VisionCortex():
         self.upper_white = np.array([180, 50, 255])
         self.lower_orange = np.array([5, 150, 150])
         self.upper_orange = np.array([15, 255, 255])
-        self.whitePercentageThreshold = 0.04 # threshold for white belly detection
+        self.whitePercentageThreshold = 0.035  # slightly lower
+        self.rod_band_below = 40              # allow more rod pixels below center
+
+        # widen ROI and relax rod color so it’s visible across headings
+        self.penguinROI = (
+            int(self.screen_center[0] - (self.screen_size[0]//5.2) // 2),
+            int(self.screen_center[1] - (self.screen_size[1]//3.2) // 2),
+            int(self.screen_size[0]//5.2),
+            int(self.screen_size[1]//3.2)
+        )
+        # rod color: lower saturation/value to catch dim/edge-on views
+        self.lower_rod = np.array([8, 30, 30])
+        self.upper_rod = np.array([35, 255, 255])
+        self.rod_band_below = 70  # keep more pixels below center to avoid cropping
+
+        # widen ROI a bit to avoid cropping beak/rod at extreme headings
+        self.penguinROI = (
+            int(self.screen_center[0] - (self.screen_size[0]//4.6) // 2),
+            int(self.screen_center[1] - (self.screen_size[1]//2.8) // 2),
+            int(self.screen_size[0]//4.6),
+            int(self.screen_size[1]//2.8)
+        )
+        # relax orange (beak) thresholds to survive dim/edge-on views
+        self.lower_orange = np.array([5, 90, 90])
+        self.upper_orange = np.array([22, 255, 255])
+        # keep more pixels below center for rod to avoid blind band
+        self.rod_band_below = 70
 
     def _circular_ema(self, prev_deg, new_deg, alpha):
         if prev_deg is None:
@@ -175,176 +201,6 @@ class VisionCortex():
             xk, yk = x, y
         # median is stabler than mean for splashes
         return int(np.median(xk)), int(np.median(yk))
-    
-    def update_player_detector(self,frame=None):
-        """
-        Detect the penguin's rod tip and compute its facing angle.
-        Returns the smoothed world-space angle (0–360°).
-        ov determines whether this is used in a debug overlay or not.
-        """
-        ov = False
-
-        # --- 1. Capture current frame ---
-        match frame:
-            case None:
-                ss = np.array(pyautogui.screenshot())
-                frame = cv.cvtColor(ss, cv.COLOR_RGB2BGR)
-            case _:
-                ov = True
-        h, w = frame.shape[:2]
-
-        # --- 2. Define relative ROI (works across all screen sizes) ---
-        # Focus on the upper region above the penguin
-        x1, x2 = int(0.3 * w), int(0.7 * w)
-        y1, y2 = int(0.25 * h), int(0.55 * h)
-        roi = frame[y1:y2, x1:x2]
-
-        # --- 3. Detect rod color (brown hue) ---
-        hsv = cv.cvtColor(roi, cv.COLOR_BGR2HSV)
-        lower = np.array([5, 30, 40])      # tweakable for different lighting
-        upper = np.array([25, 180, 180])
-        mask = cv.inRange(hsv, lower, upper)
-
-        # --- 4. Find highest contour point (rod tip) ---
-        contours, _ = cv.findContours(mask, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE)
-        if not contours:
-            return None
-
-        largest = max(contours, key=cv.contourArea)
-        topmost = tuple(largest[largest[:, :, 1].argmin()][0])
-
-        # Convert ROI-local coords → screen coords
-        tip_x = x1 + topmost[0]
-        tip_y = y1 + topmost[1]
-
-        # --- 5. Compute relative center of penguin (approx. bottom middle of screen) ---
-        cx, cy = int(w / 2), int(0.75 * h)
-
-        # --- 6. Compute world-space angle (0° = forward, 180° = away) ---
-        dx, dy = tip_x - cx, tip_y - cy
-        raw_angle = (np.degrees(np.arctan2(dy, dx)) + 360) % 360
-
-        # --- 7. Smooth the signal ---
-        if not hasattr(self, "angle_buffer"):
-            from collections import deque
-            self.angle_buffer = deque(maxlen=5)
-        self.angle_buffer.append(raw_angle)
-        smoothed_angle = float(np.mean(self.angle_buffer))
-
-        # --- 8. Debug overlay (optional) ---
-        if ov:
-            cv.circle(frame, (tip_x, tip_y), 6, (0, 0, 255), -1)
-            cv.circle(frame, (cx, cy), 6, (255, 0, 0), -1)
-            cv.line(frame, (cx, cy), (tip_x, tip_y), (0, 255, 0), 2)
-            cv.putText(frame, f"Angle: {smoothed_angle:.1f}",
-                        (50, 50), cv.FONT_HERSHEY_SIMPLEX, 1.0, (0, 0, 255), 2)
-            cv.imshow("Rod Angle Detector", frame)
-            cv.waitKey(1)
-
-        # --- 9. Return for program loop ---
-        self.current_angle = smoothed_angle
-        return smoothed_angle
-
-    def update_splash_detector(self):
-        """
-        Detect splash using motion (frame differencing), while excluding
-        sky and player zones. Returns (screen_point, smoothed_angle_deg) or None.
-        """
-        x, y, w, h = self.splashROI
-
-        # Capture ROI only
-        with mss() as sct:
-            roi_img = np.array(sct.grab({"top": y, "left": x, "width": w, "height": h}))
-        frame = cv.cvtColor(roi_img, cv.COLOR_BGRA2BGR)
-        gray = cv.cvtColor(frame, cv.COLOR_BGR2GRAY)
-        gray = cv.GaussianBlur(gray, (5, 5), 0)
-
-        # Initialize history
-        if not hasattr(self, "_prev_splash_gray"):
-            self._prev_splash_gray = gray
-            return None
-
-        # --- 1. Motion difference ---
-        diff = cv.absdiff(gray, self._prev_splash_gray)
-        _, motion_mask = cv.threshold(diff, 25, 255, cv.THRESH_BINARY)
-
-        # --- 2. Exclusion masks ---
-
-        # 2a. Exclude everything above splash ROI (already handled by ROI crop)
-        # 2b. Exclude slightly expanded player zone
-        px, py, pw, ph = self.penguinROI
-        expand = 40  # expand the player exclusion box
-        ex_left   = max(0, px - expand - x)
-        ex_top    = max(0, py - expand - y)
-        ex_right  = min(w, px + pw + expand - x)
-        ex_bottom = min(h, py + ph + expand - y)
-        cv.rectangle(motion_mask, (ex_left, ex_top), (ex_right, ex_bottom), 0, -1)
-
-        # --- 3. Morphological cleanup ---
-        kernel = np.ones((5, 5), np.uint8)
-        motion_mask = cv.morphologyEx(motion_mask, cv.MORPH_OPEN, kernel)
-        motion_mask = cv.morphologyEx(motion_mask, cv.MORPH_CLOSE, kernel)
-
-        # --- 4. Find motion blobs ---
-        contours, _ = cv.findContours(motion_mask, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE)
-        self.motion_contours = contours  # for debugging/visualization
-        if not contours:
-            self._prev_splash_gray = gray
-            self.motion_contours = []
-            return None
-
-        # Choose largest motion blob
-        best_c = max(contours, key=cv.contourArea)
-        area = cv.contourArea(best_c)
-        if area < 80 or area > 20000:
-            self._prev_splash_gray = gray
-            return None
-
-        # --- 5. Compute centroid ---
-        M = cv.moments(best_c)
-        if M["m00"] == 0:
-            self._prev_splash_gray = gray
-            return None
-        cx_local = int(M["m10"] / M["m00"])
-        cy_local = int(M["m01"] / M["m00"])
-
-        # --- 6. Convert to screen coords ---
-        sx, sy = x + cx_local, y + cy_local
-
-        # --- 7. Smooth splash point ---
-        if self.splash_point_smooth is None:
-            self.splash_point_smooth = (float(sx), float(sy))
-        else:
-            px_s, py_s = self.splash_point_smooth
-            px_s = (1 - self.splash_point_beta) * px_s + self.splash_point_beta * sx
-            py_s = (1 - self.splash_point_beta) * py_s + self.splash_point_beta * sy
-            self.splash_point_smooth = (px_s, py_s)
-        sx_s, sy_s = self.splash_point_smooth
-
-        # --- 8. Compute world angle relative to player ---
-        if hasattr(self, "penguin_center_screen") and self.penguin_center_screen is not None:
-            ox, oy = self.penguin_center_screen
-        else:
-            ox, oy = self.screen_center
-
-        dx = sx_s - ox
-        dy = sy_s - oy
-        if dx * dx + dy * dy < 25 * 25:
-            self._prev_splash_gray = gray
-            return None
-
-        raw_angle = (math.degrees(math.atan2(-dy, dx)) + 360) % 360
-        ang = self._circular_ema(self.splash_angle_smooth, raw_angle, self.splash_alpha)
-        self.splash_angle_smooth = ang
-        self.last_splash_point = (int(round(sx_s)), int(round(sy_s)))
-
-        # Update previous frame
-        self._prev_splash_gray = gray
-
-        if self.debug:
-            print(f"[MotionSplash] at ({sx_s:.1f},{sy_s:.1f}) → {self.splash_angle_smooth:.1f}° area={area:.0f}")
-
-        return (self.last_splash_point, self.splash_angle_smooth)
 
     def motion_detection(self, bbox_thresh=None, nms_thresh=1e-3, frames=None, db=False):
         '''An alternate method for detecting splashes using motion detection.'''
@@ -528,127 +384,285 @@ class VisionCortex():
         # convert final bounding boxes to center points
         points = boxes_to_points(nmax)
         return points
-
-    # def update_player_detector(self):
-    #     """Run player angle detection on the current screen."""
-    #     frame = screenshot_roi(roi=self.penguinROI)
-    #     hsv = cv.cvtColor(frame, cv.COLOR_BGR2HSV)
-
-    #     # --- 1. Detect penguin (largest dark blob near center) ---
-    #     mask_black = cv.inRange(hsv, self.lower_black, self.upper_black)
-    #     mask_black = cv.morphologyEx(mask_black, cv.MORPH_CLOSE, np.ones((7, 7), np.uint8))
-    #     mask_black = cv.morphologyEx(mask_black, cv.MORPH_OPEN, np.ones((5, 5), np.uint8))
-
-    #     contours, _ = cv.findContours(mask_black, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE)
-    #     if not contours:
-    #         if self.debug: print("No penguin detected.")
-    #         return None
-
-    #     penguin_contour = max(contours, key=cv.contourArea)
-    #     M = cv.moments(penguin_contour)
-    #     if M["m00"] == 0:
-    #         if self.debug: print("Penguin contour has zero area.")
-    #         return None
-    #     cx = int(M["m10"] / M["m00"])
-    #     cy = int(M["m01"] / M["m00"])
-    #     self.penguin_center = (cx, cy)
-
-    #     # --- 2. Detect fishing rod (light brown/yellow) ---
-    #     mask_rod = cv.inRange(hsv, self.lower_rod, self.upper_rod)
-    #     mask_rod = cv.morphologyEx(mask_rod, cv.MORPH_OPEN, np.ones((3, 3), np.uint8))
-    #     mask_rod = cv.morphologyEx(mask_rod, cv.MORPH_CLOSE, np.ones((5, 5), np.uint8))
-
-    #     # Keep only rod pixels above penguin center
-    #     mask_height, mask_width = mask_rod.shape
-    #     penguin_y = self.penguin_center[1]
-    #     mask_rod[penguin_y:mask_height, :] = 0
-
-    #     contours, _ = cv.findContours(mask_rod, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE)
-    #     if not contours:
-    #         if self.debug: print("No fishing rod detected.")
-    #         return None
-
-    #     # Find the topmost rod point
-    #     min_y = mask_height
-    #     rod_tip = None
-    #     for c in contours:
-    #         y_min = c[:, :, 1].min()
-    #         if y_min < min_y:
-    #             min_y = y_min
-    #             rod_tip = tuple(c[c[:, :, 1].argmin()][0])
-    #     if rod_tip is None:
-    #         if self.debug: print("No fishing rod tip found.")
-    #         return None
-    #     self.rod_tip = rod_tip
-
-    #     # --- 3. Determine facing direction using white belly visibility ---
-    #     mask_white = cv.inRange(hsv, self.lower_white, self.upper_white)
-    #     # Focus on lower central third of the ROI
-    #     h, w = mask_white.shape
-    #     roi_center = mask_white[h // 3 : h, w // 3 : 2 * w // 3]
-    #     white_ratio = cv.countNonZero(roi_center) / roi_center.size
-
-    #     self.facing_forward = white_ratio > self.whitePercentageThreshold
-
-    #     # --- 4. Compute rod angle relative to penguin center ---
-    #     dx = self.rod_tip[0] - self.penguin_center[0]
-    #     dy = self.rod_tip[1] - self.penguin_center[1]
-
-    #     # raw geometric angle: +x = right (0°), +y = down (so negate dy)
-    #     raw_angle = (math.degrees(math.atan2(-dy, dx)) + 360) % 360
-
-    #     # --- 5. Mirror if penguin is facing backward (to unify world orientation) ---
-    #     # When facing backward, flip 180° to represent rod direction in world space
-    #     if not self.facing_forward:
-    #         raw_angle = (raw_angle + 180) % 360
-
-    #     # --- 6. Apply exponential smoothing (to prevent jitter) ---
-    #     if self.smoothed_angle is None:
-    #         self.smoothed_angle = raw_angle
-    #     else:
-    #         diff = ((raw_angle - self.smoothed_angle + 540) % 360) - 180
-    #         self.smoothed_angle = (self.smoothed_angle + self.penguin_alpha * diff) % 360
-
-    #     # --- 7. Store the penguin center in screen coordinates for global use ---
-    #     self.penguin_center_screen = (
-    #         self.penguinROI[0] + self.penguin_center[0],
-    #         self.penguinROI[1] + self.penguin_center[1],
-    #     )
-
-    #     if self.debug:
-    #         facing = 'forward' if self.facing_forward else 'backward'
-    #         print(f"[Penguin] {self.smoothed_angle:.1f}° ({facing})")
-
-    #     return self.smoothed_angle, self.facing_forward
-
-
-def locate_fullscreen(image_path, threshold=0.8):
-    """
-    Locate the full screen image on the screen.
     
-    Args:
-        image_path (str): Path to the full screen image file.
-        threshold (float): Matching threshold (default is 0.8).
+    def update_player_detector(self, frame=None, smooth_window=5, return_forward=False):
+        """
+        Detect penguin + rod tip; return smoothed world angle (and facing flag if requested).
+        """
+        # acquire frame
+        if frame is None:
+            ss = np.array(pyautogui.screenshot())
+            frame = cv.cvtColor(ss, cv.COLOR_RGB2BGR)
+        hsv = cv.cvtColor(frame, cv.COLOR_BGR2HSV)
+
+        # --- Penguin (largest dark blob in penguinROI) ---
+        x,y,w,h = self.penguinROI
+        sub = frame[y:y+h, x:x+w]
+        hsv_sub = cv.cvtColor(sub, cv.COLOR_BGR2HSV)
+        mask_black = cv.inRange(hsv_sub, self.lower_black, self.upper_black)
+        mask_black = cv.morphologyEx(mask_black, cv.MORPH_CLOSE, np.ones((7,7), np.uint8))
+        mask_black = cv.morphologyEx(mask_black, cv.MORPH_OPEN, np.ones((5,5), np.uint8))
+        contours, _ = cv.findContours(mask_black, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE)
+        if not contours:
+            return None if not return_forward else (None, None)
+        penguin_contour = max(contours, key=cv.contourArea)
+        M = cv.moments(penguin_contour)
+        if M["m00"] == 0:
+            return None if not return_forward else (None, None)
+        cx_local = int(M["m10"] / M["m00"])
+        cy_local = int(M["m01"] / M["m00"])
+        self.penguin_center = (cx_local, cy_local)
+        self.penguin_center_screen = (x + cx_local, y + cy_local)
+
+        # --- Rod detection (light brown/yellow) ---
+        mask_rod = cv.inRange(hsv_sub, self.lower_rod, self.upper_rod)
+        mask_rod = cv.morphologyEx(mask_rod, cv.MORPH_OPEN, np.ones((2,2), np.uint8))
+        mask_rod = cv.morphologyEx(mask_rod, cv.MORPH_CLOSE, np.ones((3,3), np.uint8))
+        band = getattr(self, "rod_band_below", 70)
+        cutoff = min(cy_local + int(band), mask_rod.shape[0] - 1)
+        mask_rod[cutoff:, :] = 0
+        rod_contours, _ = cv.findContours(mask_rod, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE)
+        rod_tip = None
+        if rod_contours:
+            # farthest point from penguin center is robust across headings
+            best_pt, best_d2 = None, -1.0
+            for c in rod_contours:
+                pts = c.reshape(-1, 2)
+                dxs = pts[:, 0] - cx_local
+                dys = pts[:, 1] - cy_local
+                d2 = dxs*dxs + dys*dys
+                j = int(np.argmax(d2))
+                if float(d2[j]) > best_d2:
+                    best_d2 = float(d2[j]); best_pt = (int(pts[j,0]), int(pts[j,1]))
+            rod_tip = best_pt
+
+            # --- NEW: robust rod orientation via line fit on largest rod contour ---
+            try:
+                rc_max = max(rod_contours, key=cv.contourArea)
+                pts = rc_max.reshape(-1, 2).astype(np.float32)
+                rod_line_angle = None
+                rod_line_conf = 0.0
+                if pts.shape[0] >= 5:
+                    vx, vy, x0, y0 = cv.fitLine(pts, cv.DIST_L2, 0, 0.01, 0.01)
+                    vx, vy = float(vx), float(vy)
+                    nrm = math.hypot(vx, vy) + 1e-6
+                    vx, vy = vx/nrm, vy/nrm
+
+                    # perpendicular dispersion as quality metric
+                    x0, y0 = float(x0), float(y0)
+                    d_perp = np.abs((pts[:,0] - x0) * vy - (pts[:,1] - y0) * vx)
+                    std_perp = float(np.std(d_perp))
+                    # map dispersion to [0..1] (lower dispersion → higher confidence)
+                    rod_line_conf = max(0.0, min(1.0, 1.0 / (1.0 + std_perp / 3.0)))
+
+                    # choose sign so it points away from penguin center
+                    # pick farthest point along the line direction relative to penguin centroid
+                    t_vals = (pts[:,0] - cx_local) * vx + (pts[:,1] - cy_local) * vy
+                    if np.mean(t_vals) < 0:
+                        vx, vy = -vx, -vy
+
+                    rod_line_angle = (math.degrees(math.atan2(-vy, vx)) + 360.0) % 360.0
+
+                    # optionally update rod_tip to the extreme along the fitted line
+                    j = int(np.argmax(np.abs(t_vals)))
+                    rod_tip = (int(pts[j,0]), int(pts[j,1]))
+            except Exception:
+                rod_line_angle = None
+                rod_line_conf = 0.0
+
+        self.rod_tip = rod_tip
+
+        # --- Beak (orange) detection ---
+        beak_center = None
+        mask_orange = cv.inRange(hsv_sub, self.lower_orange, self.upper_orange)
+        mask_orange = cv.morphologyEx(mask_orange, cv.MORPH_OPEN, np.ones((2,2), np.uint8))
+        orange_cnts, _ = cv.findContours(mask_orange, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE)
+        if orange_cnts:
+            c = max(orange_cnts, key=cv.contourArea)
+            if cv.contourArea(c) >= 5:
+                m2 = cv.moments(c)
+                if m2["m00"] != 0:
+                    bx = int(m2["m10"]/m2["m00"]); by = int(m2["m01"]/m2["m00"])
+                    beak_center = (bx, by)
+
+        # --- Belly (hysteresis) (unchanged) ---
+        mask_white = cv.inRange(hsv_sub, self.lower_white, self.upper_white)
+        h_sub, w_sub = mask_white.shape
+        belly_roi = mask_white[h_sub//3:h_sub, w_sub//3:2*w_sub//3]
+        white_ratio = cv.countNonZero(belly_roi) / max(belly_roi.size, 1)
+        if not hasattr(self, "white_hi"):
+            base = getattr(self, "whitePercentageThreshold", 0.035)
+            self.white_hi = base * 1.00
+            self.white_lo = base * 0.60
+        if not hasattr(self, "_facing_forward"): self._facing_forward = True
+        if white_ratio >= self.white_hi: self._facing_forward = True
+        elif white_ratio <= self.white_lo: self._facing_forward = False
+        self.facing_forward = self._facing_forward
+
+        # --- Beak (orange) detection to orient axis ---
+        beak_center = None
+        mask_orange = cv.inRange(hsv_sub, self.lower_orange, self.upper_orange)
+        mask_orange = cv.morphologyEx(mask_orange, cv.MORPH_OPEN, np.ones((3,3), np.uint8))
+        orange_cnts, _ = cv.findContours(mask_orange, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE)
+        if orange_cnts:
+            c = max(orange_cnts, key=cv.contourArea)
+            if cv.contourArea(c) >= 6:
+                m2 = cv.moments(c)
+                if m2["m00"] != 0:
+                    bx = int(m2["m10"]/m2["m00"]); by = int(m2["m01"]/m2["m00"])
+                    beak_center = (bx, by)
+
+        # --- Body axis via PCA (undirected) ---
+        pts = penguin_contour.reshape(-1, 2).astype(np.float32)
+        _, evecs, evals = cv.PCACompute2(pts, mean=None)
+        axis = evecs[0]
+        # body eccentricity (ratio major/minor) to judge how directional the silhouette is
+        ecc = float(evals[0] / (evals[1] + 1e-6))
+
+        # measure rod vector length (0 if missing)
+        rod_len = 0.0
+        if rod_tip is not None:
+            dx_r = rod_tip[0] - cx_local
+            dy_r = rod_tip[1] - cy_local
+            rod_len = math.hypot(dx_r, dy_r)
+
+        low_info = (rod_len < 12) and (beak_center is None) and (ecc < 2.2)
+
+        # continuity helpers
+        if not hasattr(self, "_last_time"):
+            self._last_time = time.time()
+        now = time.time()
+        dt = now - self._last_time
+        self._last_time = now
+
+        if not hasattr(self, "_last_raw_angle"):
+            self._last_raw_angle = None
+        if not hasattr(self, "_spin_rate_deg_s"):
+            self._spin_rate_deg_s = 0.0
+
+        # --- NEW: confidence-weighted angle fusion (rod tip, rod line, beak, PCA axis) ---
+        cand_angles = []
+        cand_weights = []
+
+        # 1) Rod using tip vector (when sufficiently long)
+        if rod_len >= 10:
+            rod_tip_angle = (math.degrees(math.atan2(-dy_r, dx_r)) + 360.0) % 360.0
+            # weight grows with length up to ~40px
+            w_rt = max(0.0, min(1.0, (rod_len - 8.0) / 32.0)) * 1.2
+            cand_angles.append(rod_tip_angle)
+            cand_weights.append(w_rt)
+
+        # 2) Rod using line fit direction (if available)
+        if 'rod_line_angle' in locals() and rod_line_angle is not None:
+            # couple with its quality metric
+            w_rl = 0.9 * float(rod_line_conf)
+            cand_angles.append(rod_line_angle)
+            cand_weights.append(w_rl)
+
+        # 3) Beak direction
+        if beak_center is not None:
+            dx_b = beak_center[0] - cx_local
+            dy_b = beak_center[1] - cy_local
+            if dx_b*dx_b + dy_b*dy_b > 4:
+                beak_angle = (math.degrees(math.atan2(-dy_b, dx_b)) + 360.0) % 360.0
+                # use modest weight; stronger when farther from center
+                beak_dist = math.hypot(dx_b, dy_b)
+                w_bk = max(0.0, min(1.0, (beak_dist - 2.0) / 18.0)) * 0.9
+                cand_angles.append(beak_angle)
+                cand_weights.append(w_bk)
+
+        # 4) PCA body axis (choose flip closest to previous)
+        axis_angle = (math.degrees(math.atan2(-axis[1], axis[0])) + 360.0) % 360.0
+        cand_a = axis_angle
+        cand_b = (axis_angle + 180.0) % 360.0
+        if self._last_raw_angle is not None:
+            da = abs(((cand_a - self._last_raw_angle + 540.0) % 360.0) - 180.0)
+            db = abs(((cand_b - self._last_raw_angle + 540.0) % 360.0) - 180.0)
+            axis_pick = cand_a if da <= db else cand_b
+        else:
+            axis_pick = cand_a
+        # weight increases with eccentricity
+        w_ax = max(0.0, min(1.0, (ecc - 1.4) / 2.6)) * 0.6
+        cand_angles.append(axis_pick)
+        cand_weights.append(w_ax)
+
+        # if nothing valid, keep previous or axis_pick
+        if len(cand_angles) == 0 or sum(cand_weights) < 1e-6:
+            raw_angle = self._last_raw_angle if self._last_raw_angle is not None else axis_pick
+        else:
+            # circular weighted average
+            ang_rad = np.deg2rad(np.array(cand_angles))
+            w = np.asarray(cand_weights, dtype=np.float32)
+            C = float(np.sum(w * np.cos(ang_rad)))
+            S = float(np.sum(w * np.sin(ang_rad)))
+            raw_angle = (math.degrees(math.atan2(S, C)) + 360.0) % 360.0
+
+        # Low‑info frames: project previous angle forward instead of re‑deciding flip
+        if low_info and self._last_raw_angle is not None:
+            projected = (self._last_raw_angle + self._spin_rate_deg_s * dt) % 360.0
+            raw_angle = projected
+
+        # Update spin rate estimate when we have reasonable information
+        if self._last_raw_angle is not None and (not low_info):
+            diff = ((raw_angle - self._last_raw_angle + 540.0) % 360.0) - 180.0
+            inst_rate = diff / max(dt, 1e-3)
+            self._spin_rate_deg_s = 0.8 * self._spin_rate_deg_s + 0.2 * inst_rate
+
+        # Store last raw
+        self._last_raw_angle = raw_angle
+
+        # circular smoothing (unchanged)
+        if not hasattr(self, "_ang_ema"):
+            self._ang_ema = raw_angle
+        alpha = 0.25 if smooth_window > 1 else 1.0
+        self._ang_ema = self._circular_ema(self._ang_ema, raw_angle, alpha)
+        smoothed = float(self._ang_ema)
+        self.smoothed_angle = smoothed
+
+        if self.debug and (low_info or rod_len >= 12):
+            dbg = {
+                "raw": f"{raw_angle:.1f}",
+                "sm": f"{smoothed:.1f}",
+                "rod_len": f"{rod_len:.1f}",
+                "beak": "Y" if beak_center else "N",
+                "ecc": f"{ecc:.2f}",
+                "low_info": low_info,
+                "spin": f"{self._spin_rate_deg_s:.1f}"
+            }
+            print(f"[AngleDbg] {dbg}")
         
-    Returns:
-        tuple: (x, y) coordinates where the full screen image is found, or None if not found.
-    """
-    # Take a screenshot
-    screenshot = pyautogui.screenshot()
-    screenshot = cv.cvtColor(np.array(screenshot), cv.COLOR_RGB2BGR)
+        if return_forward:
+            return smoothed, self.facing_forward
+        else:
+            return smoothed
     
-    # Load the full screen image
-    full_image = cv.imread(image_path)
-    if full_image is None:
-        raise FileNotFoundError(f"Full screen image not found at {image_path}")
-    
-    # Perform template matching
-    result = cv.matchTemplate(screenshot, full_image, cv.TM_CCOEFF_NORMED)
-    
-    # Get the best match location
-    min_val, max_val, min_loc, max_loc = cv.minMaxLoc(result)
-    
-    if max_val >= threshold:
-        return max_loc  # (x, y) format
-    else:
-        return None
+    def locate_fullscreen(image_path, threshold=0.8):
+        """
+        Locate the full screen image on the screen.
+        
+        Args:
+            image_path (str): Path to the full screen image file.
+            threshold (float): Matching threshold (default is 0.8).
+            
+        Returns:
+            tuple: (x, y) coordinates where the full screen image is found, or None if not found.
+        """
+        # Take a screenshot
+        screenshot = pyautogui.screenshot()
+        screenshot = cv.cvtColor(np.array(screenshot), cv.COLOR_RGB2BGR)
+        
+        # Load the full screen image
+        full_image = cv.imread(image_path)
+        if full_image is None:
+            raise FileNotFoundError(f"Full screen image not found at {image_path}")
+        
+        # Perform template matching
+        result = cv.matchTemplate(screenshot, full_image, cv.TM_CCOEFF_NORMED)
+        
+        # Get the best match location
+        min_val, max_val, min_loc, max_loc = cv.minMaxLoc(result)
+        
+        if max_val >= threshold:
+            return max_loc  # (x, y) format
+        else:
+            return None

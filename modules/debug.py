@@ -3,30 +3,32 @@ import cv2 as cv
 import numpy as np
 from mss import mss
 import math
+import time
+from collections import deque
 import pyautogui
 from PyQt5 import QtWidgets, QtGui, QtCore
 import vision
 
 
-class FishOverlay(QtWidgets.QWidget):
-    def __init__(self, x, y, w, h, threshold=15, fps=10, log_size=8):
-        super().__init__()
+class VisionCortex():
+    """Class to handle vision processing tasks."""
+    def __init__(self, debug=False):
 
-        # Transparent overlay
-        self.setWindowFlags(QtCore.Qt.FramelessWindowHint |
-                            QtCore.Qt.WindowStaysOnTopHint |
-                            QtCore.Qt.Tool)
-        self.setAttribute(QtCore.Qt.WA_TranslucentBackground)
+        self.screen_center = vision.get_center_of_screen()
+        self.screen_size = vision.get_screen_size()
 
-        # ROI (Region of Interest)
-        self.roi = [x, y, w, h]
-        self.threshold = threshold
-        self.log = []           # text log of detections
-        self.log_size = log_size
-        self.last_detection = None  # (x, y) for visual marker
+        self.debug = debug
 
-        # ORB (more sensitive)
-        self.orb = cv.ORB_create(
+        # initialize splash detector
+
+        self.splashROI = (0, 
+                          self.screen_size[1]//6, 
+                          self.screen_size[0], 
+                          self.screen_size[1]//4)  # x, y, w, h
+        
+        self.splashThreshold = 100 # number of keypoints to confirm splash
+
+        self.splashOrb = cv.ORB_create(
             nfeatures=3000,
             scaleFactor=1.1,
             nlevels=12,
@@ -34,678 +36,721 @@ class FishOverlay(QtWidgets.QWidget):
             fastThreshold=10
         )
 
-        # Timer (for real-time updates)
-        self.timer = QtCore.QTimer()
-        self.timer.timeout.connect(self.update_overlay)
-        self.timer.start(int(1000/fps))
-
-        # Quit shortcuts
-        QtWidgets.QShortcut(QtGui.QKeySequence("Q"), self, activated=self.close)
-        QtWidgets.QShortcut(QtGui.QKeySequence("Esc"), self, activated=self.close)
-
-        # Close button
-        self.close_btn = QtWidgets.QPushButton("X", self)
-        self.close_btn.setFixedSize(40, 40)
-        self.close_btn.setStyleSheet("""
-            QPushButton {
-                background-color: rgba(200, 0, 0, 180);
-                color: white;
-                border-radius: 20px;
-                font-weight: bold;
-                font-size: 18px;
-            }
-            QPushButton:hover {
-                background-color: rgba(255, 50, 50, 220);
-            }
-        """)
-        self.close_btn.clicked.connect(self.close)
-        screen = QtWidgets.QApplication.primaryScreen().geometry()
-        self.close_btn.move(screen.width() - 60, 20)
-
-    def update_overlay(self):
-        screenshot = pyautogui.screenshot()
-        frame = cv.cvtColor(np.array(screenshot), cv.COLOR_RGB2BGR)
-        gray = cv.cvtColor(frame, cv.COLOR_BGR2GRAY)
-
-        kp, des = self.orb.detectAndCompute(gray, None)
-
-        detected = False
-        detection_point = None
-
-        if kp:
-            x, y, w, h = self.roi
-            inside = [(p.pt[0], p.pt[1]) for p in kp if x <= p.pt[0] <= x+w and y <= p.pt[1] <= y+h]
-
-            if len(inside) >= self.threshold:
-                detected = True
-                # Average keypoint positions as detection center
-                avg_x = int(np.mean([p[0] for p in inside]))
-                avg_y = int(np.mean([p[1] for p in inside]))
-                detection_point = (avg_x, avg_y + 30)  # draw slightly below ROI
-                # Angle from center
-                center_x = x + w // 2
-                center_y = y + h // 2
-                detection_angle = math.degrees(math.atan2(avg_y - center_y, avg_x - center_x))
-                detection_angle = ((detection_angle + 270) % 360)/2
-
-        # Update log
-        if detected:
-            self.last_detection = detection_point
-            self.last_detection_angle = detection_angle
-            msg = f"[{QtCore.QTime.currentTime().toString()}] Fish detected at {detection_point} with angle {detection_angle:.1f}°."
-            self.log.append(msg)
-        else:
-            msg = f"[{QtCore.QTime.currentTime().toString()}] No fish."
-            self.log.append(msg)
-
-        # Limit log size
-        if len(self.log) > self.log_size:
-            self.log = self.log[-self.log_size:]
-
-        self.repaint()
-
-    def paintEvent(self, event):
-        painter = QtGui.QPainter(self)
-        painter.setRenderHint(QtGui.QPainter.Antialiasing)
-
-        x, y, w, h = self.roi
-
-        # ROI rectangle
-        painter.setPen(QtGui.QPen(QtGui.QColor(0, 0, 255, 200), 2))
-        painter.drawRect(x, y, w, h)
-
-        # Draw detection marker
-        if self.last_detection:
-            fx, fy = self.last_detection
-            angle = self.last_detection_angle
-            painter.setBrush(QtGui.QColor(255, 0, 0, 220))
-            painter.setPen(QtGui.QPen(QtGui.QColor(255, 0, 0, 200), 2))
-            painter.drawEllipse(QtCore.QPoint(fx, fy), 8, 8)
-            painter.setPen(QtGui.QPen(QtGui.QColor(255, 255, 255, 220)))
-            painter.setFont(QtGui.QFont("Consolas", 12))
-            painter.drawText(fx + 15, fy + 5, f"({fx}, {fy}), {angle:.1f}°")
-
-        # Draw text log bottom-left
-        screen = QtWidgets.QApplication.primaryScreen().geometry()
-        painter.setFont(QtGui.QFont("Consolas", 12))
-        y_offset = screen.height() - 20
-        for entry in reversed(self.log):
-            painter.setPen(QtGui.QPen(QtGui.QColor(255, 255, 255, 220)))
-            painter.drawText(20, y_offset, entry)
-            y_offset -= 20
-
-class PlayerOverlay(QtWidgets.QWidget):
-    def __init__(self, player_images, fps=10):
-        super().__init__()
-
-        # Transparent overlay setup
-        self.setWindowFlags(QtCore.Qt.FramelessWindowHint |
-                            QtCore.Qt.WindowStaysOnTopHint |
-                            QtCore.Qt.Tool)
-        self.setAttribute(QtCore.Qt.WA_TranslucentBackground)
-
-        # Load reference images
-        self.player_images = []
-        for img in player_images:
-            image = cv.imread(str(img), cv.IMREAD_GRAYSCALE)
-            if image is not None:
-                self.player_images.append(image)
-        if len(self.player_images) == 0:
-            raise ValueError("No player images could be loaded.")
-
-        # AKAZE feature detector (rotation-aware)
-        self.detector = cv.AKAZE_create(threshold=1e-4)
-
-        # Compute keypoints/descriptors for templates
-        self.kps, self.dess = [], []
-        for img in self.player_images:
-            kp, des = self.detector.detectAndCompute(img, None)
-            self.kps.append(kp)
-            self.dess.append(des)
-
-        # Matcher
-        self.bf = cv.BFMatcher(cv.NORM_HAMMING, crossCheck=True)
-
-        # State variables
-        self.angle = None
-        self.angle_smooth = None
-        self.smoothing_alpha = 0.2
-        self.found = False
-        self.show_debug = False
-
-        # Timer
-        self.timer = QtCore.QTimer()
-        self.timer.timeout.connect(self.update_overlay)
-        self.timer.start(int(1000 / fps))
-
-        # Shortcuts
-        QtWidgets.QShortcut(QtGui.QKeySequence("Q"), self, activated=self.close)
-        QtWidgets.QShortcut(QtGui.QKeySequence("Esc"), self, activated=self.close)
-        QtWidgets.QShortcut(QtGui.QKeySequence("D"), self, activated=self.toggle_debug)
-
-        # Close button
-        self.close_btn = QtWidgets.QPushButton("X", self)
-        self.close_btn.setFixedSize(40, 40)
-        self.close_btn.setStyleSheet("""
-            QPushButton {
-                background-color: rgba(200, 0, 0, 180);
-                color: white;
-                border-radius: 20px;
-                font-weight: bold;
-                font-size: 18px;
-            }
-            QPushButton:hover {
-                background-color: rgba(255, 50, 50, 220);
-            }
-        """)
-        screen = QtWidgets.QApplication.primaryScreen().geometry()
-        self.close_btn.move(screen.width() - 60, 20)
-
-    # ------------------------------------------------------------
-
-    def toggle_debug(self):
-        self.show_debug = not self.show_debug
-        if not self.show_debug:
-            cv.destroyAllWindows()
-
-    # ------------------------------------------------------------
-
-    def update_overlay(self):
-        screenshot = pyautogui.screenshot()
-        frame = cv.cvtColor(np.array(screenshot), cv.COLOR_RGB2BGR)
-        gray = cv.cvtColor(frame, cv.COLOR_BGR2GRAY)
-
-        # Focus on ±400 px area around screen center
-        h, w = gray.shape
-        cx, cy = w // 2, h // 2
-        x1, y1 = max(0, cx - 400), max(0, cy - 400)
-        x2, y2 = min(w, cx + 400), min(h, cy + 400)
-        roi = gray[y1:y2, x1:x2]
-
-        # Detect features in the ROI
-        kp_frame, des_frame = self.detector.detectAndCompute(roi, None)
-        self.found = False
-        self.angle = None
-
-        if kp_frame is None or des_frame is None or len(kp_frame) < 4:
-            self.repaint()
-            return
-
-        # Try matching each template
-        best_score = -np.inf
-        best_angle = None
-        best_vis = None
-
-        for i, des in enumerate(self.dess):
-            if des is None or len(des) == 0:
-                continue
-
-            matches = self.bf.match(des, des_frame)
-            matches = sorted(matches, key=lambda x: x.distance)
-            good = [m for m in matches if m.distance < 70]
-            if len(good) < 4:
-                continue
-
-            pts1 = np.float32([self.kps[i][m.queryIdx].pt for m in good])
-            pts2 = np.float32([kp_frame[m.trainIdx].pt for m in good])
-
-            # Estimate affine transform between template and ROI
-            M, inliers = cv.estimateAffinePartial2D(pts1, pts2, method=cv.RANSAC)
-            if M is None:
-                continue
-
-            angle_rad = np.arctan2(M[1, 0], M[0, 0])
-            angle_deg = (np.degrees(angle_rad) + 360) % 360
-
-            inlier_ratio = np.mean(inliers) if inliers is not None else 0
-            score = inlier_ratio * len(good)
-
-            if score > best_score:
-                best_score = score
-                best_angle = angle_deg
-                if self.show_debug:
-                    best_vis = cv.drawMatches(
-                        self.player_images[i], self.kps[i],
-                        roi, kp_frame,
-                        good[:30], None,
-                        flags=cv.DrawMatchesFlags_NOT_DRAW_SINGLE_POINTS
-                    )
-
-        # Update final rotation estimate
-        if best_angle is not None:
-            self.found = True
-
-            if self.angle_smooth is None:
-                self.angle_smooth = best_angle
-            else:
-                diff = (best_angle - self.angle_smooth + 540) % 360 - 180
-                self.angle_smooth = (self.angle_smooth + self.smoothing_alpha * diff) % 360
-
-            self.angle = self.angle_smooth
-
-            # Debug window
-            if self.show_debug and best_vis is not None:
-                cv.putText(best_vis, f"Angle: {self.angle:.1f}°",
-                           (20, 50), cv.FONT_HERSHEY_SIMPLEX, 1.0, (0, 255, 0), 2)
-                cv.imshow("AKAZE Debug Matches", best_vis)
-                cv.waitKey(1)
-
-        self.repaint()
-
-    # ------------------------------------------------------------
-
-    def paintEvent(self, event):
-        painter = QtGui.QPainter(self)
-        painter.setRenderHint(QtGui.QPainter.Antialiasing)
-        if self.found and self.angle is not None:
-            text = f"Player Angle: {self.angle:.1f}°"
-            color = QtGui.QColor(0, 255, 0, 220)
-        else:
-            text = "Player Not Found"
-            color = QtGui.QColor(255, 0, 0, 220)
-        painter.setFont(QtGui.QFont("Consolas", 16))
-        painter.setPen(QtGui.QPen(color))
-        painter.drawText(20, 40, text)       
-
-def debug_player_angle(player_images):
-    app = QtWidgets.QApplication(sys.argv)
-    overlay = PlayerOverlay(player_images, fps=5)
-    # only overlay the top half of the screen
-    screen = QtWidgets.QApplication.primaryScreen().geometry()
-    overlay.setGeometry(0, 0, screen.width(), screen.height()//4)
-
-    overlay.show()
-    sys.exit(app.exec_())
-
-class MaskOverlay(QtWidgets.QWidget):
-    def __init__(self, mode="white", fps=5):
-        # ensure QApplication exists
-        self._owns_app = False
-        app = QtWidgets.QApplication.instance()
-        if app is None:
-            self.app = QtWidgets.QApplication([])
-            self._owns_app = True
-        else:
-            self.app = app
-
-        super().__init__()
-        self.mode = mode
-        self.count = 0
-        self.mask = None
-
-        screen_center = QtWidgets.QApplication.primaryScreen().geometry().center()
-        self.roi = (screen_center.x() - 400, screen_center.y() - 400, 800, 800)
-
-        # transparent always-on-top overlay
-        self.setWindowFlags(QtCore.Qt.FramelessWindowHint |
-                            QtCore.Qt.WindowStaysOnTopHint |
-                            QtCore.Qt.Tool)
-        self.setAttribute(QtCore.Qt.WA_TranslucentBackground)
-
-        # configure window size to bottom third
-        screen = QtWidgets.QApplication.primaryScreen().geometry()
-        w, h = screen.width(), screen.height()
-        h_third = h // 3
-        self.setGeometry(0, h - h_third, w, h_third)
-
-        # Close button
-        self.close_btn = QtWidgets.QPushButton("X", self)
-        self.close_btn.setFixedSize(40, 40)
-        self.close_btn.move(w - 60, 20)
-        self.close_btn.setStyleSheet("""
-            QPushButton {
-                background-color: rgba(200,0,0,180);
-                color: white;
-                border-radius: 20px;
-                font-weight: bold;
-                font-size: 18px;
-            }
-            QPushButton:hover {
-                background-color: rgba(255,50,50,220);
-            }
-        """)
-        self.close_btn.clicked.connect(self.close)
-
-        # timer for live updates
-        self.timer = QtCore.QTimer()
-        self.timer.timeout.connect(self.update_overlay)
-        self.timer.start(int(1000 / fps))
-
-        # keyboard shortcuts
-        QtWidgets.QShortcut(QtGui.QKeySequence("Q"), self, activated=self.close)
-        QtWidgets.QShortcut(QtGui.QKeySequence("Esc"), self, activated=self.close)
-        QtWidgets.QShortcut(QtGui.QKeySequence("B"), self, activated=self.set_black_mode)
-        QtWidgets.QShortcut(QtGui.QKeySequence("W"), self, activated=self.set_white_mode)
-
-    def set_black_mode(self):
-        self.mode = "black"
-
-    def set_white_mode(self):
-        self.mode = "white"
-
-    def update_overlay(self):
-        """Refresh mask with ROI ~800 px around the center and counter every frame."""
-        self.mask = vision.screenshot_mask(self.mode, self.roi)
-        self.count = cv.countNonZero(self.mask)
-        self.update()  # triggers paintEvent
-
-    def paintEvent(self, event):
-        painter = QtGui.QPainter(self)
-        painter.setRenderHint(QtGui.QPainter.Antialiasing)
-        painter.setFont(QtGui.QFont("Consolas", 16))
-        painter.setPen(QtGui.QPen(QtGui.QColor(255, 255, 255, 220)))
-        painter.drawText(20, self.height() - 40,
-                         f"Mode: {self.mode.capitalize()} | Count: {self.count}")
-
-    def run(self):
-        """Show and start app loop if we own it."""
-        self.show()
-        if self._owns_app:
-            self.app.exec_()
-
-class RodAngleTracker(QtWidgets.QWidget):
-    """Transparent overlay that detects and visualizes the penguin's fishing-rod angle."""
-
-    def __init__(self, fps=10, alpha=0.25, roi_size=400):
-        # QApplication setup
-        app = QtWidgets.QApplication.instance()
-        self._owns_app = False
-        if app is None:
-            app = QtWidgets.QApplication(sys.argv)
-            self._owns_app = True
-        self.app = app
-        super().__init__()
-
-        self.alpha = alpha
-        self.smoothed_angle = None
-        self.penguin_center = None
-        self.rod_tip = None
-        self.angle_text = "Angle: 0°"
-
-        # --- Window setup (click-through translucent ROI overlay) ---
-        self.setWindowFlags(
-            QtCore.Qt.FramelessWindowHint
-            | QtCore.Qt.WindowStaysOnTopHint
-            | QtCore.Qt.Tool
+        # splash detector parameters
+        self.splashThreshold = 400            # bounding box area threshold
+        self.splash_alpha = 0.45              # faster angular response
+        self.splash_point_beta = 0.55         # faster position tracking
+        self.splash_angle_smooth = None
+        self.splash_point_smooth = None
+
+        self._kp_hist = deque(maxlen=20)
+        self._last_detect_t = 0.0
+        self._cooldown_sec = 0.15          # shorter cooldown (was 0.3)
+        self._need_confirm = False
+        self._pending_pt = None
+        self.motion_detection_frames = [] # will hold current frame and one prior for motion detection
+
+        # --- Motion detection tuning (to suppress horizon waves) ---
+        self.motion_diff_thresh = 25          # binary threshold on frame diff (increase to ignore low motion)
+        self.horizon_mask_frac = 0.33         # top fraction of splash ROI to ignore (waves/horizon)
+        self.min_bbox_h = 16                  # reject very flat bands (min bbox height in px)
+        self.max_wave_aspect = 4.0            # reject very wide bands (w/h larger than this)
+
+        # initialize player angle detector
+        pengX = int(self.screen_center[0] - (self.screen_size[0]//6.4) // 2)
+        pengY = int(self.screen_center[1] - (self.screen_size[1]//4) // 2)
+
+        self.penguinROI = (pengX,
+                           pengY,
+                           int(self.screen_size[0]//6.4),
+                           int(self.screen_size[1]//4))  # x, y, w, h
+
+        self.penguin_alpha = 0.25 # smoothing factor for angle updates
+        self.penguin_center = None # penguin center point, dynamically updated
+        self.rod_tip = None # fishing rod tip point, dynamically updated
+        self.smoothed_angle = None # smoothed angle value
+        self.facing_forward = None # facing direction (True/False)
+
+        # colors for the penguin and rod detection
+        self.lower_black = np.array([0, 0, 0])
+        self.upper_black = np.array([180, 255, 50])
+        self.lower_rod = np.array([10, 80, 80])
+        self.upper_rod = np.array([35, 255, 255])
+        self.lower_white = np.array([0, 0, 180])
+        self.upper_white = np.array([180, 50, 255])
+        self.lower_orange = np.array([5, 150, 150])
+        self.upper_orange = np.array([15, 255, 255])
+        self.whitePercentageThreshold = 0.035  # slightly lower
+        self.rod_band_below = 40              # allow more rod pixels below center
+
+        # widen ROI and relax rod color so it’s visible across headings
+        self.penguinROI = (
+            int(self.screen_center[0] - (self.screen_size[0]//5.2) // 2),
+            int(self.screen_center[1] - (self.screen_size[1]//3.2) // 2),
+            int(self.screen_size[0]//5.2),
+            int(self.screen_size[1]//3.2)
         )
-        self.setAttribute(QtCore.Qt.WA_TranslucentBackground)
-        self.setAttribute(QtCore.Qt.WA_NoSystemBackground, True)
-        self.setAttribute(QtCore.Qt.WA_OpaquePaintEvent, False)
-        self.setAutoFillBackground(False)
+        # rod color: lower saturation/value to catch dim/edge-on views
+        self.lower_rod = np.array([8, 30, 30])
+        self.upper_rod = np.array([35, 255, 255])
+        self.rod_band_below = 70  # keep more pixels below center to avoid cropping
 
-        # Compute centered ROI
-        screen = QtWidgets.QApplication.primaryScreen().geometry()
-        center = screen.center()
-        x = center.x() - roi_size // 2
-        y = center.y() - roi_size // 2
-        w = h = roi_size
-        self.roi = (x, y, w, h)
+        # widen ROI a bit to avoid cropping beak/rod at extreme headings
+        self.penguinROI = (
+            int(self.screen_center[0] - (self.screen_size[0]//4.6) // 2),
+            int(self.screen_center[1] - (self.screen_size[1]//2.8) // 2),
+            int(self.screen_size[0]//4.6),
+            int(self.screen_size[1]//2.8)
+        )
+        # relax orange (beak) thresholds to survive dim/edge-on views
+        self.lower_orange = np.array([5, 90, 90])
+        self.upper_orange = np.array([22, 255, 255])
+        # keep more pixels below center for rod to avoid blind band
+        self.rod_band_below = 70
 
-        # Only cover the ROI region, not full screen
-        self.setGeometry(x, y, w, h)
+    def _circular_ema(self, prev_deg, new_deg, alpha):
+        if prev_deg is None:
+            return new_deg
+        diff = ((new_deg - prev_deg + 540) % 360) - 180
+        return (prev_deg + alpha * diff) % 360
 
-        # Make the overlay mouse-transparent so clicks pass through
-        self.setWindowFlag(QtCore.Qt.WindowTransparentForInput, True)
+    def _robust_centroid(self, xs, ys):
+        # remove outliers with MAD (median absolute deviation)
+        x = np.asarray(xs); y = np.asarray(ys)
+        mx, my = np.median(x), np.median(y)
+        madx = np.median(np.abs(x - mx)) + 1e-6
+        mady = np.median(np.abs(y - my)) + 1e-6
+        keep = (np.abs(x - mx) <= 2.5 * madx) & (np.abs(y - my) <= 2.5 * mady)
+        xk, yk = x[keep], y[keep]
+        if xk.size < 5:   # fall back if we pruned too hard
+            xk, yk = x, y
+        # median is stabler than mean for splashes
+        return int(np.median(xk)), int(np.median(yk))
 
-        # Timer
-        self.timer = QtCore.QTimer()
-        self.timer.timeout.connect(self._tick)
-        self.timer.start(int(1000 / fps))
+    def motion_detection(self, bbox_thresh=None, nms_thresh=1e-3, frames=None, db=False):
+        '''An alternate method for detecting splashes using motion detection.'''
+        ''' if frames is provided, use those frames instead of taking new screenshots '''
+        
+        # helper functions
+        def get_mask(frame1, frame2, kernel=np.array((9,9), dtype=np.uint8)):
+            """ Obtains image mask
+                Inputs: 
+                    frame1 - Grayscale frame at time t
+                    frame2 - Grayscale frame at time t + 1
+                    kernel - (NxN) array for Morphological Operations
+                Outputs: 
+                    mask - Thresholded mask for moving pixels
+                """
 
-        # Quit keys
-        QtWidgets.QShortcut(QtGui.QKeySequence("Q"), self, activated=self.close)
-        QtWidgets.QShortcut(QtGui.QKeySequence("Esc"), self, activated=self.close)
+            # frame difference
+            frame_diff = cv.absdiff(frame2, frame1)
 
-    def _tick(self):
-        # capture ROI each frame
-        with mss() as sct:
-            x, y, w, h = self.roi
-            grab = np.array(sct.grab({"top": y, "left": x, "width": w, "height": h}))
-            frame = cv.cvtColor(grab, cv.COLOR_BGRA2BGR)
-        self._process(frame)
-        self.update()
+            # slight denoise
+            frame_diff = cv.medianBlur(frame_diff, 3)
 
-    def _process(self, frame):
-        """Analyze frame to find penguin center, rod tip, facing direction, and rod angle."""
+            # binary threshold (non-inverted) to suppress low-amplitude waves
+            _, mask = cv.threshold(frame_diff, self.motion_diff_thresh, 255, cv.THRESH_BINARY)
+
+            # morphology: prefer vertical features, break long horizontal bands
+            open_k = cv.getStructuringElement(cv.MORPH_RECT, (3, 7))   # taller kernel
+            close_k = cv.getStructuringElement(cv.MORPH_RECT, (3, 3))
+            mask = cv.morphologyEx(mask, cv.MORPH_OPEN, open_k)
+            mask = cv.morphologyEx(mask, cv.MORPH_CLOSE, close_k)
+
+            return mask
+
+        def get_contour_detections(mask, thresh=400):
+            """ Obtains initial proposed detections from contours discoverd on the mask. 
+                Scores are taken as the bbox area, larger is higher.
+                Inputs:
+                    mask - thresholded image mask
+                    thresh - threshold for contour size
+                Outputs:
+                    detectons - array of proposed detection bounding boxes and scores [[x1,y1,x2,y2,s]]
+                """
+            # get mask contours
+            contours, _ = cv.findContours(mask, 
+                                        cv.RETR_EXTERNAL, # cv.RETR_TREE, 
+                                        cv.CHAIN_APPROX_TC89_L1)
+            detections = []
+            for cnt in contours:
+                x,y,w,h = cv.boundingRect(cnt)
+                area = w*h
+                # reject very flat/wide bands near horizon
+                if area <= thresh: 
+                    continue
+                if h < self.min_bbox_h:
+                    continue
+                if w / max(h, 1) > self.max_wave_aspect:
+                    continue
+                detections.append([x,y,x+w,y+h, area])
+
+            # Ensure a 2D array even when empty
+            if len(detections) == 0:
+                return np.empty((0, 5), dtype=np.int32)
+            return np.array(detections, dtype=np.int32)
+        
+        def remove_contained_bboxes(boxes):
+            """ Removes all smaller boxes that are contained within larger boxes.
+                Requires bboxes to be soirted by area (score)
+                Inputs:
+                    boxes - array bounding boxes sorted (descending) by area 
+                            [[x1,y1,x2,y2]]
+                Outputs:
+                    keep - indexes of bounding boxes that are not entirely contained 
+                        in another box
+                """
+            check_array = np.array([True, True, False, False])
+            keep = list(range(0, len(boxes)))
+            for i in keep: # range(0, len(bboxes)):
+                for j in range(0, len(boxes)):
+                    # check if box j is completely contained in box i
+                    if np.all((np.array(boxes[j]) >= np.array(boxes[i])) == check_array):
+                        try:
+                            keep.remove(j)
+                        except ValueError:
+                            continue
+            return keep
+
+        def non_max_suppression(boxes, scores, threshold=1e-1):
+            """
+            Perform non-max suppression on a set of bounding boxes and corresponding scores.
+            Inputs:
+                boxes: a list of bounding boxes in the format [xmin, ymin, xmax, ymax]
+                scores: a list of corresponding scores 
+                threshold: the IoU (intersection-over-union) threshold for merging bounding boxes
+            Outputs:
+                boxes - non-max suppressed boxes
+            """
+            # Sort the boxes by score in descending order
+            boxes = boxes[np.argsort(scores)[::-1]]
+
+            # remove all contained bounding boxes and get ordered index
+            order = remove_contained_bboxes(boxes)
+
+            keep = []
+            while order:
+                i = order.pop(0)
+                keep.append(i)
+                for j in order:
+                    # Calculate the IoU between the two boxes
+                    intersection = max(0, min(boxes[i][2], boxes[j][2]) - max(boxes[i][0], boxes[j][0])) * \
+                                max(0, min(boxes[i][3], boxes[j][3]) - max(boxes[i][1], boxes[j][1]))
+                    union = (boxes[i][2] - boxes[i][0]) * (boxes[i][3] - boxes[i][1]) + \
+                            (boxes[j][2] - boxes[j][0]) * (boxes[j][3] - boxes[j][1]) - intersection
+                    iou = intersection / union
+
+                    # Remove boxes with IoU greater than the threshold
+                    if iou > threshold:
+                        order.remove(j)
+                        
+            return boxes[keep]
+        
+        def boxes_to_points(boxes):
+            """ Converts bounding boxes to center points.
+                Inputs:
+                    boxes - array of bounding boxes [[x1,y1,x2,y2]]
+                Outputs:
+                    points - array of center points [[x,y]]
+                """
+            points = []
+            for box in boxes:
+                x1, y1, x2, y2 = box
+                cx = (x1 + x2) // 2
+                cy = (y1 + y2) // 2
+                points.append([cx, cy])
+            return points
+        
+        if bbox_thresh is None:
+            bbox_thresh = self.splashThreshold
+
+        # if frames is a list with two frames, use those
+        if frames is not None and len(frames) == 2:
+            img1, img2 = frames
+            img1 = cv.cvtColor(img1, cv.COLOR_BGR2GRAY)
+            img2 = cv.cvtColor(img2, cv.COLOR_BGR2GRAY)
+        else:
+            frame = vision.screenshot_roi(roi=self.splashROI)
+            gray = cv.cvtColor(frame, cv.COLOR_BGR2GRAY)
+            self.motion_detection_frames.append(gray)
+            if len(self.motion_detection_frames) < 2: return None
+            if len(self.motion_detection_frames) > 2:
+                self.motion_detection_frames.pop(0)
+
+            # convert to grayscale
+            img1 = self.motion_detection_frames[0]
+            img2 = self.motion_detection_frames[1]
+
+        # compute motion mask
+        kernel = np.array((9,9), dtype=np.uint8)
+        mask = get_mask(img1, img2, kernel)
+
+        # suppress top band within splash ROI (horizon region)
+        if mask is not None and mask.size > 0:
+            top_cut = int(mask.shape[0] * self.horizon_mask_frac)
+            if top_cut > 0:
+                mask[:top_cut, :] = 0
+
+        # get initially proposed detections from contours
+        detections = get_contour_detections(mask, bbox_thresh)
+
+        # Early out if no detections
+        if detections is None or detections.shape[0] == 0:
+            return np.empty((0, 4), dtype=np.int32)
+
+        # separate bboxes and scores
+        bboxes = detections[:, :4]
+        scores = detections[:, -1]
+
+        # perform Non-Maximal Supression on initial detections
+        nmax = non_max_suppression(bboxes, scores, nms_thresh)
+
+        if db: return nmax
+        # convert final bounding boxes to center points
+        points = boxes_to_points(nmax)
+        return points
+    
+    def update_player_detector(self, frame=None, smooth_window=5, return_forward=False):
+        """
+        Detect penguin + rod tip; return smoothed world angle (and facing flag if requested).
+        """
+        # acquire frame
+        if frame is None:
+            ss = np.array(pyautogui.screenshot())
+            frame = cv.cvtColor(ss, cv.COLOR_RGB2BGR)
         hsv = cv.cvtColor(frame, cv.COLOR_BGR2HSV)
 
-        # --- 1. Detect penguin (largest dark blob near center) ---
-        lower_black = np.array([0, 0, 0])
-        upper_black = np.array([180, 255, 50])
-        mask_black = cv.inRange(hsv, lower_black, upper_black)
-        mask_black = cv.morphologyEx(mask_black, cv.MORPH_CLOSE, np.ones((7, 7), np.uint8))
-        mask_black = cv.morphologyEx(mask_black, cv.MORPH_OPEN, np.ones((5, 5), np.uint8))
-
+        # --- Penguin (largest dark blob in penguinROI) ---
+        x,y,w,h = self.penguinROI
+        sub = frame[y:y+h, x:x+w]
+        hsv_sub = cv.cvtColor(sub, cv.COLOR_BGR2HSV)
+        mask_black = cv.inRange(hsv_sub, self.lower_black, self.upper_black)
+        mask_black = cv.morphologyEx(mask_black, cv.MORPH_CLOSE, np.ones((7,7), np.uint8))
+        mask_black = cv.morphologyEx(mask_black, cv.MORPH_OPEN, np.ones((5,5), np.uint8))
         contours, _ = cv.findContours(mask_black, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE)
         if not contours:
-            return
-
+            return None if not return_forward else (None, None)
         penguin_contour = max(contours, key=cv.contourArea)
         M = cv.moments(penguin_contour)
         if M["m00"] == 0:
-            return
-        cx = int(M["m10"] / M["m00"])
-        cy = int(M["m01"] / M["m00"])
-        self.penguin_center = (cx, cy)
+            return None if not return_forward else (None, None)
+        cx_local = int(M["m10"] / M["m00"])
+        cy_local = int(M["m01"] / M["m00"])
+        self.penguin_center = (cx_local, cy_local)
+        self.penguin_center_screen = (x + cx_local, y + cy_local)
 
-        # --- 2. Detect fishing rod (light brown/yellow) ---
-        lower_rod = np.array([10, 80, 80])
-        upper_rod = np.array([35, 255, 255])
-        mask_rod = cv.inRange(hsv, lower_rod, upper_rod)
-        mask_rod = cv.morphologyEx(mask_rod, cv.MORPH_OPEN, np.ones((3, 3), np.uint8))
-        mask_rod = cv.morphologyEx(mask_rod, cv.MORPH_CLOSE, np.ones((5, 5), np.uint8))
-
-        # Keep only rod pixels above penguin center
-        mask_height, mask_width = mask_rod.shape
-        penguin_y = self.penguin_center[1]
-        mask_rod[penguin_y:mask_height, :] = 0
-
-        contours, _ = cv.findContours(mask_rod, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE)
-        if not contours:
-            return
-
-        # Find the topmost rod point
-        min_y = mask_height
+        # --- Rod detection (light brown/yellow) ---
+        mask_rod = cv.inRange(hsv_sub, self.lower_rod, self.upper_rod)
+        mask_rod = cv.morphologyEx(mask_rod, cv.MORPH_OPEN, np.ones((2,2), np.uint8))
+        mask_rod = cv.morphologyEx(mask_rod, cv.MORPH_CLOSE, np.ones((3,3), np.uint8))
+        band = getattr(self, "rod_band_below", 70)
+        cutoff = min(cy_local + int(band), mask_rod.shape[0] - 1)
+        mask_rod[cutoff:, :] = 0
+        rod_contours, _ = cv.findContours(mask_rod, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE)
         rod_tip = None
-        for c in contours:
-            y_min = c[:, :, 1].min()
-            if y_min < min_y:
-                min_y = y_min
-                rod_tip = tuple(c[c[:, :, 1].argmin()][0])
+        if rod_contours:
+            # farthest point from penguin center is robust across headings
+            best_pt, best_d2 = None, -1.0
+            for c in rod_contours:
+                pts = c.reshape(-1, 2)
+                dxs = pts[:, 0] - cx_local
+                dys = pts[:, 1] - cy_local
+                d2 = dxs*dxs + dys*dys
+                j = int(np.argmax(d2))
+                if float(d2[j]) > best_d2:
+                    best_d2 = float(d2[j]); best_pt = (int(pts[j,0]), int(pts[j,1]))
+            rod_tip = best_pt
 
-        if rod_tip is None:
-            return
+            # --- NEW: robust rod orientation via line fit on largest rod contour ---
+            try:
+                rc_max = max(rod_contours, key=cv.contourArea)
+                pts = rc_max.reshape(-1, 2).astype(np.float32)
+                rod_line_angle = None
+                rod_line_conf = 0.0
+                if pts.shape[0] >= 5:
+                    vx, vy, x0, y0 = cv.fitLine(pts, cv.DIST_L2, 0, 0.01, 0.01)
+                    vx, vy = float(vx), float(vy)
+                    nrm = math.hypot(vx, vy) + 1e-6
+                    vx, vy = vx/nrm, vy/nrm
+
+                    # perpendicular dispersion as quality metric
+                    x0, y0 = float(x0), float(y0)
+                    d_perp = np.abs((pts[:,0] - x0) * vy - (pts[:,1] - y0) * vx)
+                    std_perp = float(np.std(d_perp))
+                    # map dispersion to [0..1] (lower dispersion → higher confidence)
+                    rod_line_conf = max(0.0, min(1.0, 1.0 / (1.0 + std_perp / 3.0)))
+
+                    # choose sign so it points away from penguin center
+                    # pick farthest point along the line direction relative to penguin centroid
+                    t_vals = (pts[:,0] - cx_local) * vx + (pts[:,1] - cy_local) * vy
+                    if np.mean(t_vals) < 0:
+                        vx, vy = -vx, -vy
+
+                    rod_line_angle = (math.degrees(math.atan2(-vy, vx)) + 360.0) % 360.0
+
+                    # optionally update rod_tip to the extreme along the fitted line
+                    j = int(np.argmax(np.abs(t_vals)))
+                    rod_tip = (int(pts[j,0]), int(pts[j,1]))
+            except Exception:
+                rod_line_angle = None
+                rod_line_conf = 0.0
+
         self.rod_tip = rod_tip
 
-        # --- 3. Determine facing direction using white belly visibility ---
-        lower_white = np.array([0, 0, 180])
-        upper_white = np.array([180, 50, 255])
-        mask_white = cv.inRange(hsv, lower_white, upper_white)
+        # --- Beak (orange) detection ---
+        beak_center = None
+        mask_orange = cv.inRange(hsv_sub, self.lower_orange, self.upper_orange)
+        mask_orange = cv.morphologyEx(mask_orange, cv.MORPH_OPEN, np.ones((2,2), np.uint8))
+        orange_cnts, _ = cv.findContours(mask_orange, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE)
+        if orange_cnts:
+            c = max(orange_cnts, key=cv.contourArea)
+            if cv.contourArea(c) >= 5:
+                m2 = cv.moments(c)
+                if m2["m00"] != 0:
+                    bx = int(m2["m10"]/m2["m00"]); by = int(m2["m01"]/m2["m00"])
+                    beak_center = (bx, by)
 
-        # Focus on lower central third of the ROI
-        h, w = mask_white.shape
-        roi_center = mask_white[h // 3 : h, w // 3 : 2 * w // 3]
-        white_ratio = cv.countNonZero(roi_center) / roi_center.size
+        # --- Belly (hysteresis) (unchanged) ---
+        mask_white = cv.inRange(hsv_sub, self.lower_white, self.upper_white)
+        h_sub, w_sub = mask_white.shape
+        belly_roi = mask_white[h_sub//3:h_sub, w_sub//3:2*w_sub//3]
+        white_ratio = cv.countNonZero(belly_roi) / max(belly_roi.size, 1)
+        if not hasattr(self, "white_hi"):
+            base = getattr(self, "whitePercentageThreshold", 0.035)
+            self.white_hi = base * 1.00
+            self.white_lo = base * 0.60
+        if not hasattr(self, "_facing_forward"): self._facing_forward = True
+        if white_ratio >= self.white_hi: self._facing_forward = True
+        elif white_ratio <= self.white_lo: self._facing_forward = False
+        self.facing_forward = self._facing_forward
 
-        self.facing_forward = white_ratio > 0.05  # threshold ~5% white pixels
+        # --- Beak (orange) detection to orient axis ---
+        beak_center = None
+        mask_orange = cv.inRange(hsv_sub, self.lower_orange, self.upper_orange)
+        mask_orange = cv.morphologyEx(mask_orange, cv.MORPH_OPEN, np.ones((3,3), np.uint8))
+        orange_cnts, _ = cv.findContours(mask_orange, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE)
+        if orange_cnts:
+            c = max(orange_cnts, key=cv.contourArea)
+            if cv.contourArea(c) >= 6:
+                m2 = cv.moments(c)
+                if m2["m00"] != 0:
+                    bx = int(m2["m10"]/m2["m00"]); by = int(m2["m01"]/m2["m00"])
+                    beak_center = (bx, by)
 
-        # --- 4. Compute rod angle relative to penguin center ---
-        dx = self.rod_tip[0] - self.penguin_center[0]
-        dy = self.rod_tip[1] - self.penguin_center[1]
-        raw_angle = (math.degrees(math.atan2(-dy, dx)) + 360) % 360
+        # --- Body axis via PCA (undirected) ---
+        pts = penguin_contour.reshape(-1, 2).astype(np.float32)
+        _, evecs, evals = cv.PCACompute2(pts, mean=None)
+        axis = evecs[0]
+        # body eccentricity (ratio major/minor) to judge how directional the silhouette is
+        ecc = float(evals[0] / (evals[1] + 1e-6))
 
-        # Mirror horizontally if penguin is facing away
-        if not self.facing_forward:
-            raw_angle = (540 - raw_angle) % 360  # mirror across vertical axis
+        # measure rod vector length (0 if missing)
+        rod_len = 0.0
+        if rod_tip is not None:
+            dx_r = rod_tip[0] - cx_local
+            dy_r = rod_tip[1] - cy_local
+            rod_len = math.hypot(dx_r, dy_r)
 
-        # --- 5. Apply smoothing to avoid jitter ---
-        if self.smoothed_angle is None:
-            self.smoothed_angle = raw_angle
+        low_info = (rod_len < 12) and (beak_center is None) and (ecc < 2.2)
+
+        # continuity helpers
+        if not hasattr(self, "_last_time"):
+            self._last_time = time.time()
+        now = time.time()
+        dt = now - self._last_time
+        self._last_time = now
+
+        if not hasattr(self, "_last_raw_angle"):
+            self._last_raw_angle = None
+        if not hasattr(self, "_spin_rate_deg_s"):
+            self._spin_rate_deg_s = 0.0
+
+        # --- NEW: confidence-weighted angle fusion (rod tip, rod line, beak, PCA axis) ---
+        cand_angles = []
+        cand_weights = []
+
+        # 1) Rod using tip vector (when sufficiently long)
+        if rod_len >= 10:
+            rod_tip_angle = (math.degrees(math.atan2(-dy_r, dx_r)) + 360.0) % 360.0
+            # weight grows with length up to ~40px
+            w_rt = max(0.0, min(1.0, (rod_len - 8.0) / 32.0)) * 1.2
+            cand_angles.append(rod_tip_angle)
+            cand_weights.append(w_rt)
+
+        # 2) Rod using line fit direction (if available)
+        if 'rod_line_angle' in locals() and rod_line_angle is not None:
+            # couple with its quality metric
+            w_rl = 0.9 * float(rod_line_conf)
+            cand_angles.append(rod_line_angle)
+            cand_weights.append(w_rl)
+
+        # 3) Beak direction
+        if beak_center is not None:
+            dx_b = beak_center[0] - cx_local
+            dy_b = beak_center[1] - cy_local
+            if dx_b*dx_b + dy_b*dy_b > 4:
+                beak_angle = (math.degrees(math.atan2(-dy_b, dx_b)) + 360.0) % 360.0
+                # use modest weight; stronger when farther from center
+                beak_dist = math.hypot(dx_b, dy_b)
+                w_bk = max(0.0, min(1.0, (beak_dist - 2.0) / 18.0)) * 0.9
+                cand_angles.append(beak_angle)
+                cand_weights.append(w_bk)
+
+        # 4) PCA body axis (choose flip closest to previous)
+        axis_angle = (math.degrees(math.atan2(-axis[1], axis[0])) + 360.0) % 360.0
+        cand_a = axis_angle
+        cand_b = (axis_angle + 180.0) % 360.0
+        if self._last_raw_angle is not None:
+            da = abs(((cand_a - self._last_raw_angle + 540.0) % 360.0) - 180.0)
+            db = abs(((cand_b - self._last_raw_angle + 540.0) % 360.0) - 180.0)
+            axis_pick = cand_a if da <= db else cand_b
         else:
-            delta = ((raw_angle - self.smoothed_angle + 540) % 360) - 180
-            self.smoothed_angle = (self.smoothed_angle + self.alpha * delta) % 360
+            axis_pick = cand_a
+        # weight increases with eccentricity
+        w_ax = max(0.0, min(1.0, (ecc - 1.4) / 2.6)) * 0.6
+        cand_angles.append(axis_pick)
+        cand_weights.append(w_ax)
 
-        # --- 6. Output text ---
-        direction_label = "Forward" if self.facing_forward else "Away"
-        self.angle_text = f"Angle: {self.smoothed_angle:.1f}° ({direction_label})"
-
-    def paintEvent(self, event):
-        painter = QtGui.QPainter(self)
-        painter.setRenderHint(QtGui.QPainter.Antialiasing)
-        painter.setPen(QtGui.QPen(QtGui.QColor(255, 255, 255, 230)))
-        painter.setFont(QtGui.QFont("Consolas", 16))
-        painter.drawText(20, 40, self.angle_text)
-
-        # draw debugging vector
-        if self.penguin_center and self.rod_tip:
-            px, py = self.penguin_center
-            rx, ry = self.rod_tip
-            painter.setPen(QtGui.QPen(QtGui.QColor(0, 255, 0), 3))
-            painter.drawLine(px, py, rx, ry)
-            painter.setBrush(QtGui.QColor(0, 255, 0))
-            painter.drawEllipse(px - 4, py - 4, 8, 8)
-            painter.setBrush(QtGui.QColor(0, 0, 255))
-            painter.drawEllipse(rx - 4, ry - 4, 8, 8)
-
-    def run(self):
-        self.show()
-        if self._owns_app:
-            sys.exit(self.app.exec_())
-
-class FishingHUDOverlay(QtWidgets.QWidget):
-    def __init__(self, fps=10):
-        app = QtWidgets.QApplication.instance()
-        self._owns_app = False
-        if app is None:
-            app = QtWidgets.QApplication(sys.argv)
-            self._owns_app = True
-        self.app = app
-        super().__init__()
-
-        # Vision backend
-        self.vision = vision.VisionCortex(debug=False)
-
-        # UI setup
-        self.setWindowFlags(QtCore.Qt.FramelessWindowHint |
-                            QtCore.Qt.WindowStaysOnTopHint |
-                            QtCore.Qt.Tool)
-        self.setAttribute(QtCore.Qt.WA_TranslucentBackground)
-        self.setWindowFlag(QtCore.Qt.WindowTransparentForInput, True)
-        self.setGeometry(0, 0, *self.vision.screen_size)
-
-        # State
-        self.fish_log = []
-        self.log_size = 6
-        self.last_fish = None
-        self.splash_angle = None
-        self.last_angle = 0
-        self.direction_label = "?"
-        self.motion_lines = []  # store motion contour lines
-
-        # Timer
-        self.timer = QtCore.QTimer()
-        self.timer.timeout.connect(self.update_overlay)
-        self.timer.start(int(1000 / fps))
-
-        # Exit keys
-        QtWidgets.QShortcut(QtGui.QKeySequence("Q"), self, activated=self.close)
-        QtWidgets.QShortcut(QtGui.QKeySequence("Esc"), self, activated=self.close)
-
-    def update_overlay(self):
-        # Run detectors
-        splash_data = self.vision.update_splash_detector()   # (pt, angle) or None
-        player_data = self.vision.update_player_detector()   # (angle, facing) or None
-
-        # --- Track splash detections ---
-        if splash_data:
-            (pt, s_ang) = splash_data
-            self.last_fish = pt
-            msg = f"[{QtCore.QTime.currentTime().toString()}] Splash @ {pt}  ∠ {s_ang:.1f}°"
-            self.fish_log.append(msg)
-            self.splash_angle = s_ang
-        if len(self.fish_log) > self.log_size:
-            self.fish_log = self.fish_log[-self.log_size:]
-
-        # --- Track player info ---
-        if player_data:
-            angle, facing = player_data
-            self.last_angle = angle
-            self.direction_label = "Forward" if facing else "Away"
-
-        # --- Store current motion lines for overlay ---
-        if hasattr(self.vision, "motion_contours") and self.vision.motion_contours:
-            self.motion_lines = []
-            for c in self.vision.motion_contours:
-                pts = c.reshape(-1, 2)
-                pts[:, 0] += self.vision.splashROI[0]
-                pts[:, 1] += self.vision.splashROI[1]
-                self.motion_lines.append(pts)
+        # if nothing valid, keep previous or axis_pick
+        if len(cand_angles) == 0 or sum(cand_weights) < 1e-6:
+            raw_angle = self._last_raw_angle if self._last_raw_angle is not None else axis_pick
         else:
-            self.motion_lines = []
+            # circular weighted average
+            ang_rad = np.deg2rad(np.array(cand_angles))
+            w = np.asarray(cand_weights, dtype=np.float32)
+            C = float(np.sum(w * np.cos(ang_rad)))
+            S = float(np.sum(w * np.sin(ang_rad)))
+            raw_angle = (math.degrees(math.atan2(S, C)) + 360.0) % 360.0
 
-        self.update()
+        # Low‑info frames: project previous angle forward instead of re‑deciding flip
+        if low_info and self._last_raw_angle is not None:
+            projected = (self._last_raw_angle + self._spin_rate_deg_s * dt) % 360.0
+            raw_angle = projected
 
-    def paintEvent(self, event):
-        painter = QtGui.QPainter(self)
-        painter.setRenderHint(QtGui.QPainter.Antialiasing)
+        # Update spin rate estimate when we have reasonable information
+        if self._last_raw_angle is not None and (not low_info):
+            diff = ((raw_angle - self._last_raw_angle + 540.0) % 360.0) - 180.0
+            inst_rate = diff / max(dt, 1e-3)
+            self._spin_rate_deg_s = 0.8 * self._spin_rate_deg_s + 0.2 * inst_rate
 
-        # --- 1. Draw Splash ROI ---
-        x, y, w, h = self.vision.splashROI
-        painter.setPen(QtGui.QPen(QtGui.QColor(0, 128, 255, 180), 2))
-        painter.drawRect(x, y, w, h)
+        # Store last raw
+        self._last_raw_angle = raw_angle
 
-        # --- 2. Draw motion contours ---
-        if self.motion_lines:
-            painter.setPen(QtGui.QPen(QtGui.QColor(255, 255, 0, 180), 2))
-            for pts in self.motion_lines:
-                for i in range(len(pts) - 1):
-                    p1 = QtCore.QPoint(*pts[i])
-                    p2 = QtCore.QPoint(*pts[i + 1])
-                    painter.drawLine(p1, p2)
-                # close contour loop
-                if len(pts) > 2:
-                    painter.drawLine(QtCore.QPoint(*pts[-1]), QtCore.QPoint(*pts[0]))
+        # circular smoothing (unchanged)
+        if not hasattr(self, "_ang_ema"):
+            self._ang_ema = raw_angle
+        alpha = 0.25 if smooth_window > 1 else 1.0
+        self._ang_ema = self._circular_ema(self._ang_ema, raw_angle, alpha)
+        smoothed = float(self._ang_ema)
+        self.smoothed_angle = smoothed
 
-        # --- 3. Fish marker ---
-        if self.last_fish:
-            fx, fy = self.last_fish
-            painter.setBrush(QtGui.QColor(255, 0, 0, 220))
-            painter.drawEllipse(QtCore.QPoint(fx, fy), 8, 8)
-            if self.splash_angle is not None:
-                painter.setFont(QtGui.QFont("Consolas", 12))
-                painter.setPen(QtGui.QColor(255, 255, 255, 230))
-                painter.drawText(fx + 14, fy, f"{self.splash_angle:.1f}°")
+        if self.debug and (low_info or rod_len >= 12):
+            dbg = {
+                "raw": f"{raw_angle:.1f}",
+                "sm": f"{smoothed:.1f}",
+                "rod_len": f"{rod_len:.1f}",
+                "beak": "Y" if beak_center else "N",
+                "ecc": f"{ecc:.2f}",
+                "low_info": low_info,
+                "spin": f"{self._spin_rate_deg_s:.1f}"
+            }
+            print(f"[AngleDbg] {dbg}")
+        
+        if return_forward:
+            return smoothed, self.facing_forward
+        else:
+            return smoothed
 
-        # --- 4. Player info ---
-        painter.setFont(QtGui.QFont("Consolas", 16))
-        painter.setPen(QtGui.QColor(255, 255, 255, 230))
-        painter.drawText(20, 40, f"Rod: {self.last_angle:.1f}° ({self.direction_label})")
+def rotate_away(
+    visual,
+    target_angle=90,
+    tolerance=12,
+    sample_delay=0.02,
+    base_step_time=0.06,
+    min_step_time=0.02,
+    slowdown_radius=20,
+    max_time=6.0,
+    debug=True
+):
+    """
+    Rotate until facing forward (angle≈target_angle). Uses raw angle, adaptive step time,
+    and one-time self-calibration to map left/right keys to angle increase/decrease.
+    """
 
-        # --- 5. Rod visualization ---
-        if self.vision.penguin_center and self.vision.rod_tip:
-            px, py = self.vision.penguin_center
-            rx, ry = self.vision.rod_tip
-            x, y, w, h = self.vision.penguinROI
-            px += x
-            py += y
-            rx += x
-            ry += y
-            painter.setPen(QtGui.QPen(QtGui.QColor(0, 255, 0, 200), 3))
-            painter.drawLine(px, py, rx, ry)
-            painter.setBrush(QtGui.QColor(0, 255, 0))
-            painter.drawEllipse(px - 4, py - 4, 8, 8)
-            painter.setBrush(QtGui.QColor(255, 255, 0))
-            painter.drawEllipse(rx - 4, ry - 4, 8, 8)
+    def shortest_diff(a, b):
+        # signed shortest difference a-b in degrees, in (-180, 180]
+        return ((a - b + 540.0) % 360.0) - 180.0
 
-        # --- 6. Log ---
-        screen = QtWidgets.QApplication.primaryScreen().geometry()
-        painter.setFont(QtGui.QFont("Consolas", 12))
-        y_offset = screen.height() - 20
-        for entry in reversed(self.fish_log):
-            painter.drawText(20, y_offset, entry)
-            y_offset -= 20
+    def read_raw():
+        val = visual.update_player_detector(smooth_window=1)
+        return None if val is None else (val % 360.0)
 
-    def run(self):
-        self.show()
-        if self._owns_app:
-            sys.exit(self.app.exec_())
+    def tap(key, dt):
+        pyautogui.keyDown(key)
+        time.sleep(dt)
+        pyautogui.keyUp(key)
+
+    # ensure keys not stuck
+    pyautogui.keyUp('left'); pyautogui.keyUp('right')
+
+    # establish initial reading
+    angle = read_raw()
+    if angle is None:
+        if debug: print("[rotate_away/dbg] No initial angle; waiting for tracking...")
+        t_wait = time.time()
+        while angle is None and time.time() - t_wait < 1.5:
+            time.sleep(0.05)
+            angle = read_raw()
+        if angle is None:
+            if debug: print("[rotate_away/dbg] Tracking failed.")
+            return None
+
+    # self-calibrate which key increases angle (store on visual)
+    if not hasattr(visual, "_turn_left_sign"):
+        a0 = angle
+        tap('left', 0.03)
+        time.sleep(sample_delay)
+        a1 = read_raw() or a0
+        left_sign = np.sign(shortest_diff(a1, a0)) or 1  # fallback +1
+        visual._turn_left_sign = int(left_sign)
+        if debug: print(f"[rotate_away/dbg] Calibrated: left_sign={visual._turn_left_sign}")
+
+    t0 = time.time()
+    last_angle = angle
+    no_progress = 0
+
+    while time.time() - t0 < max_time:
+        angle = read_raw()
+        if angle is None:
+            if debug: print("[rotate_away/dbg] Lost tracking; pausing...")
+            time.sleep(0.1)
+            continue
+
+        diff = shortest_diff(target_angle, angle)
+        abs_diff = abs(diff)
+        if debug:
+            print(f"[rotate_away] angle={angle:.2f}°, diff={diff:.2f}°")
+
+        # stop condition
+        if abs_diff <= tolerance:
+            pyautogui.keyUp('left'); pyautogui.keyUp('right')
+            if debug:
+                print(f"[rotate_away] Penguin aligned forward at {angle:.2f}° within ±{tolerance}° tolerance.")
+            return angle
+
+        # adaptive step time
+        if abs_diff < slowdown_radius:
+            step = min_step_time + (base_step_time - min_step_time) * (abs_diff / max(slowdown_radius, 1.0))
+        else:
+            step = base_step_time
+        step = float(np.clip(step, min_step_time, base_step_time))
+
+        # choose direction based on calibration and sign of desired change
+        need_sign = 1 if diff > 0 else -1
+        if visual._turn_left_sign == need_sign:
+            tap('left', step)
+        else:
+            tap('right', step)
+
+        time.sleep(sample_delay)
+
+        # progress check
+        new_angle = read_raw() or angle
+        moved = abs(shortest_diff(new_angle, last_angle))
+        if moved < 0.5:
+            no_progress += 1
+            # mildly increase step to break static friction
+            base_step_time = min(0.10, base_step_time + 0.01)
+        else:
+            no_progress = 0
+        last_angle = new_angle
+
+        # re-check mapping if repeatedly stuck
+        if no_progress >= 6:
+            if debug: print("[rotate_away/dbg] Recalibrating turn direction...")
+            a0 = read_raw() or last_angle
+            tap('left', 0.04)
+            time.sleep(sample_delay)
+            a1 = read_raw() or a0
+            left_sign = np.sign(shortest_diff(a1, a0)) or visual._turn_left_sign
+            visual._turn_left_sign = int(left_sign)
+            no_progress = 0
+
+    pyautogui.keyUp('left'); pyautogui.keyUp('right')
+    if debug:
+        cur = read_raw()
+        print(f"[rotate_away] Timeout; last angle={cur if cur is not None else 'None'}")
+    return angle
+
+def rotate_camera_toward_splash(sx, sy, visual, 
+                                x_tolerance=40, 
+                                y_tolerance=80, 
+                                sensitivity=0.04, 
+                                max_time=3.0, 
+                                vertical=False,
+                                min_step=3.0,
+                                max_step=100.0,
+                                reacquire=True,
+                                reacquire_period=0.08):
+    """
+    Center the splash (sx, sy) by rotating the camera with repeated mouse moves.
+    Closed-loop: optionally re-acquires the splash each step using visual.motion_detection.
+    Returns True on success, False on timeout.
+    """
+    # Resolve screen center
+    sc = getattr(visual, "screen_center", None)
+    if not sc or not isinstance(sc, (tuple, list)) or len(sc) < 2:
+        sc = vision.get_center_of_screen()
+    cx, cy = int(sc[0]), int(sc[1])
+
+    # Track a current target that we can refresh
+    cur_x, cur_y = float(sx), float(sy)
+    roi_x, roi_y, _, _ = getattr(visual, "splashROI", (0, 0, 0, 0))
+
+    start = time.time()
+    last_acq = 0.0
+    centered = False
+    dx = cur_x - cx
+    dy = cur_y - cy
+
+    while time.time() - start < max_time:
+        # Reacquire splash to update target (closed loop)
+        if reacquire and (time.time() - last_acq) >= reacquire_period:
+            pts = visual.motion_detection()
+            if pts is not None:
+                pts = np.asarray(pts)
+                if pts.size >= 2 and pts.ndim == 2 and pts.shape[1] >= 2:
+                    # convert ROI-relative points to screen coords
+                    xs = pts[:, 0] + roi_x
+                    ys = pts[:, 1] + roi_y
+                    # pick robust center of detections
+                    tx, ty = visual._robust_centroid(xs, ys)
+                    cur_x, cur_y = float(tx), float(ty)
+            last_acq = time.time()
+
+        # Compute current error to screen center
+        dx = cur_x - cx
+        dy = cur_y - cy
+
+        # Stop condition
+        if abs(dx) <= x_tolerance and (not vertical or abs(dy) <= y_tolerance):
+            centered = True
+            break
+
+        # Proportional steps (no prediction; we will re-measure next loop)
+        step_x = np.sign(dx) * max(min_step, min(abs(dx) * sensitivity, max_step))
+        step_y = 0.0
+        if vertical:
+            step_y = np.sign(dy) * max(1.0, min(abs(dy) * (0.7 * sensitivity), 0.7 * max_step))
+
+        pyautogui.moveRel(step_x, step_y, duration=0.01)
+        time.sleep(0.012)
+
+    # stop movement (explicit no-op)
+    pyautogui.moveRel(0, 0)
+    if centered:
+        print(f"[rotate_toward_splash] Camera aligned (dx={dx:.1f}, dy={dy:.1f}).")
+        return True
+    else:
+        print(f"[rotate_toward_splash] Timeout; residual (dx={dx:.1f}, dy={dy:.1f}).")
+        return False
