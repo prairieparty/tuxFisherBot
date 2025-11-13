@@ -149,7 +149,7 @@ def main():
     module_files = list(Path(modules_directory).rglob("*.py"))
 
     # make modules accessible globally
-    global control, vision, debug
+    global control, vision
 
     # load the vision module
     vision = loadModule("vision")
