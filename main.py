@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 
 # Author: Jackson O'Connor
-# Date: 20251009
+# Date: 20251113
 # Description: This program automatically launches Tux Fisher, before proceeding to automatically catch fish.
 '''Patch Notes:
 20251001: Initial commit.
@@ -72,10 +72,7 @@
 - reworked searching to reverse direction every eight turns or so; this helps with rotation during the casting.
 '''
 '''To Do:
-- improve motion detection to work with moving camera
-- rework rotating the penguin toward splash - incredibly janky right now
 - optimize the codebase - there's probably a lot of redundant code and imports
-
 '''
 
 # IMPORTS
